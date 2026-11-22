@@ -177,7 +177,9 @@ import com.example.ui.theme.SplitFlowTheme
 import com.example.ui.theme.SplitFlowThemeTokens
 import com.example.viewmodel.LedgerUiState
 import com.example.viewmodel.SplitFlowViewModel
+import android.util.Log
 import com.google.firebase.Firebase
+import com.google.firebase.FirebaseApp
 import com.google.firebase.auth.auth
 import com.google.firebase.firestore.FirebaseFirestore
 import kotlinx.coroutines.launch

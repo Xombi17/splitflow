@@ -113,7 +113,7 @@ class SplitFlowRepository(
             .firstOrNull()
         if (firestoreError == null && error is CancellationException) throw error
         val exceptionToLog = firestoreError ?: (error as? Exception)
-        if (exceptionToLog != null && auth.currentUser?.uid == uid) {
+        if (exceptionToLog != null && auth?.currentUser?.uid == uid) {
             handleFirestoreError(exceptionToLog, operationType, path)
         }
         throw error
@@ -127,7 +127,7 @@ class SplitFlowRepository(
         val path = "users/$userId"
         return try {
             val uid = requireUserId(userId)
-            val user = auth.currentUser
+            val user = auth?.currentUser
             val resolvedName = user?.displayName?.trim()?.takeIf { it.isNotBlank() }
                 ?: user?.email?.substringBefore("@")?.replaceFirstChar { it.uppercase() }
                 ?: "SplitFlow User"

@@ -24,7 +24,7 @@ import java.util.Locale
 import kotlin.math.abs
 
 private const val LOG_TAG = "CactusLocalModels"
-private const val WHISPER_EN_PROMPT = "<|startoftranscript|><|en|><|transcribe|><|notimestamps|>"
+private const val WHISPER_FINANCE_PROMPT = "SplitFlow: Tanmay, Rahul, Rohan, rupees, ₹, dinner, chai, zomato, swiggy, petrol, paid, owes, split, settled"
 
 enum class LocalModelPhase {
     NOT_DOWNLOADED,
@@ -388,7 +388,7 @@ object CactusLocalModelManager {
 
                 val startMs = System.currentTimeMillis()
                 val isWhisperModel = activeSlug.lowercase(Locale.US).contains("whisper")
-                val primaryPrompt = if (isWhisperModel) WHISPER_EN_PROMPT else ""
+                val primaryPrompt = if (isWhisperModel) WHISPER_FINANCE_PROMPT else ""
 
                 try {
                     val streamed = StringBuilder()
@@ -577,7 +577,7 @@ object CactusLocalModelManager {
                     )
                     val completion = engine.generateCompletion(
                         messages = messages,
-                        params = CactusCompletionParams(temperature = 0.1, maxTokens = 768)
+                        params = CactusCompletionParams(temperature = 0.1, maxTokens = 256)
                     )
                     val elapsedMs = (System.currentTimeMillis() - startMs).coerceAtLeast(1L)
                     if (completion?.success == true && !completion.response.isNullOrBlank()) {

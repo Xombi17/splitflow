@@ -35,6 +35,7 @@ object LocalVoiceParser {
         "auto", "flight", "hotel", "villa", "rent", "wifi", "electricity", "movie", "tickets",
         "shopping", "snacks", "party", "trip", "pizza", "burger", "beer", "cafe",
         "swiggy", "zomato", "dhaba", "petrol", "fuel", "each",
+        "ko", "se", "ne", "ka", "ki", "ke", "aur", "diye", "mile", "de", "diya", "rupaye",
         "except", "skipped", "without", "excluding", "just", "only", "please", "add", "log",
         "record", "hey", "hi", "hello", "ok", "okay", "has", "have", "needs", "need", "will",
         "was", "were", "is", "are", "been", "today", "yesterday", "tonight", "now", "here",
@@ -214,7 +215,15 @@ object LocalVoiceParser {
             RegexOption.IGNORE_CASE
         ).find(transcript)?.takeIf {
             !lower.contains("split") && !lower.contains("with ")
-        }
+        } ?: if (!lower.contains("split") && !lower.contains("with ") && !lower.contains("owe")) {
+            Regex("^(?:add\\s+|put\\s+|log\\s+)?([A-Za-z][A-Za-z']+)\\s+(?:ko\\s+)?(?:₹|\\$|€|£|rs\\.?\\s*)?\\d+", RegexOption.IGNORE_CASE).find(transcript)?.takeIf {
+                val name = it.groupValues[1].lowercase(Locale.US)
+                name !in stopWords && name != "i" && name != "we" && name != "paid"
+            } ?: Regex("(?:₹|\\$|€|£|rs\\.?\\s*)?\\d+\\s+(?:on|for|against|to|ko)\\s+([A-Za-z][A-Za-z']+)", RegexOption.IGNORE_CASE).find(transcript)?.takeIf {
+                val name = it.groupValues[1].lowercase(Locale.US)
+                name !in stopWords && name != "me" && name != "us"
+            }
+        } else null
 
         if (friendOwesMeMatch != null) {
             val rawName = friendOwesMeMatch.groupValues[1]
@@ -605,7 +614,7 @@ object LocalVoiceParser {
         val found = linkedSetOf<String>()
         val lower = transcript.lowercase(Locale.US)
 
-        // Match existing friends first (case-insensitive)
+        // 1. Match existing friends first (case-insensitive)
         for (m in members) {
             if (m.selfProfile) continue
             val first = m.name.split(" ").firstOrNull()?.trim().orEmpty()
@@ -614,11 +623,13 @@ object LocalVoiceParser {
             }
         }
 
-        // Match names after "with ..." / "and ..."
-        val afterWith = Regex("\\b(?:with|and)\\s+([A-Za-z][A-Za-z']+(?:\\s*(?:,|and)\\s*[A-Za-z][A-Za-z']+)*)", RegexOption.IGNORE_CASE)
-            .findAll(transcript)
-        afterWith.forEach { m ->
-            m.groupValues.getOrNull(1)?.split(Regex("\\s*(?:,|\\band\\b)\\s*", RegexOption.IGNORE_CASE))?.forEach { token ->
+        // 2. Match names after prepositions ("with ...", "and ...", "for ...", "to ...", "between ...", "among ...")
+        val prepPattern = Regex(
+            "\\b(?:with|and|to|for|from|between|among|on|against|se|ko|aur)\\s+([A-Za-z][A-Za-z']+(?:\\s*(?:,|and|aur|&)\\s*[A-Za-z][A-Za-z']+)*)",
+            RegexOption.IGNORE_CASE
+        )
+        prepPattern.findAll(transcript).forEach { m ->
+            m.groupValues.getOrNull(1)?.split(Regex("\\s*(?:,|\\band\\b|\\baur\\b|&)\\s*", RegexOption.IGNORE_CASE))?.forEach { token ->
                 val t = token.trim()
                 if (t.length >= 2 && t.lowercase(Locale.US) !in stopWords) {
                     found.add(cleanTitleCase(t))
@@ -626,11 +637,12 @@ object LocalVoiceParser {
             }
         }
 
-        // Fallback capitalized tokens (excluding stopwords)
-        Regex("\\b([A-Z][a-z']{2,})\\b").findAll(transcript).forEach { match ->
-            val word = match.groupValues[1]
-            if (word.lowercase(Locale.US) !in stopWords) {
-                found.add(word)
+        // 3. Fallback: Any word token of 3+ letters that is not a stopword and not a number
+        val tokens = transcript.split(Regex("[^A-Za-z']+")).filter { it.isNotBlank() }
+        for (tok in tokens) {
+            val l = tok.lowercase(Locale.US)
+            if (l.length >= 3 && l !in stopWords && l != "null") {
+                found.add(cleanTitleCase(tok))
             }
         }
         return found.toList()

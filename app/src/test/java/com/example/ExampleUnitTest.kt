@@ -71,4 +71,31 @@ class ExampleUnitTest {
     )
     assertEquals(ExpenseCategory.FOOD, result.category)
   }
+
+  @Test
+  fun testShorthandIouParsing() {
+    val result = LocalVoiceParser.parse(
+      rawInput = "Tanmay 500",
+      members = allMembers,
+      groups = emptyList(),
+      defaultCurrency = CurrencyCode.INR
+    )
+    assertEquals(VoiceActionType.DIRECT_IOU, result.actionType)
+    assertEquals(50000L, result.totalMinorUnits)
+    assertEquals("user_tanmay", result.participants.first().memberId)
+  }
+
+  @Test
+  fun testLowercaseTranscriptParsing() {
+    val result = LocalVoiceParser.parse(
+      rawInput = "split 1200 with tanmay and parth for dinner",
+      members = allMembers,
+      groups = emptyList(),
+      defaultCurrency = CurrencyCode.INR
+    )
+    assertEquals(VoiceActionType.SHARED_EXPENSE, result.actionType)
+    assertEquals(120000L, result.totalMinorUnits)
+    assertEquals(3, result.participants.size)
+    assertEquals(ExpenseCategory.FOOD, result.category)
+  }
 }

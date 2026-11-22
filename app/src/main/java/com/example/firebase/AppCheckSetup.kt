@@ -25,7 +25,7 @@ fun configureAppCheck(context: Context, intent: Intent?) {
                 val fallbackOptions = com.google.firebase.FirebaseOptions.Builder()
                     .setApplicationId(context.packageName)
                     .setProjectId("splitflow-offline")
-                    .setApiKey("AIzaSySplitFlowOfflineFallbackKey000000")
+                    .setApiKey("offline-fallback-key-000000")
                     .build()
                 FirebaseApp.initializeApp(context, fallbackOptions)
             }

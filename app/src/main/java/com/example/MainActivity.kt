@@ -105,7 +105,8 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.compose.ui.graphics.graphicsLayer
-import com.example.ai.GeminiSplitService
+import com.example.ai.CactusLocalModelManager
+import com.example.ai.LocalSplitAiService
 import com.example.data.GuestLedgerRepository
 import com.example.data.GuestSessionStore
 import com.example.data.OnboardingPreferenceStore
@@ -172,8 +173,9 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // STEP 1: Configure Firebase App Check with launch intent before UI or Firebase calls
+        // STEP 1: Configure Firebase App Check & initialize Cactus local AI runtime
         configureAppCheck(this, intent)
+        CactusLocalModelManager.initContext(this)
 
         // STEP 2: Enable Edge-to-Edge rendering
         enableEdgeToEdge()
@@ -370,7 +372,7 @@ private fun AuthenticatedSplitFlowShell(
                 }
                 SplitFlowViewModel(
                     repository = repo,
-                    geminiService = GeminiSplitService(),
+                    localAiService = LocalSplitAiService(app),
                     currentUserId = currentUserId
                 )
             }
@@ -434,6 +436,7 @@ private fun AuthenticatedSplitFlowShell(
     val spendCoachState by viewModel.spendCoachState.collectAsStateWithLifecycle()
     val coachFollowUpAnswer by viewModel.coachFollowUpAnswer.collectAsStateWithLifecycle()
     val isCoachStreaming by viewModel.isCoachStreaming.collectAsStateWithLifecycle()
+    val localAiEngineState by viewModel.localAiEngineState.collectAsStateWithLifecycle()
 
     val toggleDarkMode: () -> Unit = {
         val next = !isDarkMode
@@ -956,8 +959,10 @@ private fun AuthenticatedSplitFlowShell(
                 ExpenseLensSheet(
                     snapshot = readySnapshot,
                     lensState = receiptLensState,
+                    localAiState = localAiEngineState,
                     initialGroupId = selectedGroupId,
                     onAnalyzeBitmap = { viewModel.analyzeReceiptBitmap(it) },
+                    onInstallMirage = { viewModel.installMirageModel() },
                     onResetLens = { viewModel.resetReceiptLens() },
                     onSaveExpense = { record ->
                         viewModel.saveExpense(record) {
@@ -973,7 +978,9 @@ private fun AuthenticatedSplitFlowShell(
                 VoiceCommandSheet(
                     snapshot = readySnapshot,
                     voiceState = voiceSplitState,
+                    localAiState = localAiEngineState,
                     initialGroupId = if (currentTab == SplitFlowTab.GROUPS) selectedGroupId else null,
+                    onInstallWhistle = { viewModel.installWhistleModel() },
                     onProcessAudio = { wavBytes, grpId, autoApply ->
                         viewModel.processVoiceAudio(wavBytes, grpId, autoApply)
                     },
@@ -1405,7 +1412,7 @@ private fun QuickAddChooserSheet(
 
             QuickAddOptionCard(
                 title = "Batch Multi-Receipt Import",
-                subtitle = "Drop up to 8 trip bills -> parallel Gemini Vision extraction & approval queue",
+                subtitle = "Drop up to 8 trip bills -> parallel on-device Mirage OCR & approval queue",
                 icon = Icons.Rounded.DynamicFeed,
                 accentColor = tokens.aiAccent,
                 showAiBadge = true,
@@ -1415,7 +1422,7 @@ private fun QuickAddChooserSheet(
 
             QuickAddOptionCard(
                 title = "Voice & Natural Language Split",
-                subtitle = "Dictate or type complex splits with group memory & exclusions",
+                subtitle = "Local Cactus Whistle transcription & instant ledger updates",
                 icon = Icons.Rounded.Mic,
                 accentColor = tokens.aiAccent,
                 showAiBadge = true,
@@ -1424,8 +1431,8 @@ private fun QuickAddChooserSheet(
             )
 
             QuickAddOptionCard(
-                title = "AI Monthly Spend Coach",
-                subtitle = "Analyze category burn, budget caps & recurring bills with Gemini",
+                title = "On-Device Spend Coach",
+                subtitle = "Analyze category burn, budget caps & recurring bills locally",
                 icon = Icons.Rounded.AutoAwesome,
                 accentColor = tokens.aiAccent,
                 showAiBadge = true,

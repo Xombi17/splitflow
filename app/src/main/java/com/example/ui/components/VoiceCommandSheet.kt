@@ -90,6 +90,19 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import android.content.Intent
+import android.os.Bundle
+import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
+import androidx.compose.material.icons.rounded.Download
+import androidx.compose.material.icons.rounded.Memory
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import com.example.ai.LocalAiEngineState
+import com.example.ai.LocalModelPhase
 import com.example.ai.VoiceAudioRecorder
 import com.example.engine.FinanceEngine
 import com.example.model.AsyncUiState
@@ -104,6 +117,7 @@ import com.example.ui.motion.SpringVisibilityStyle
 import com.example.ui.motion.springClickable
 import com.example.ui.theme.SplitFlowThemeTokens
 import com.example.viewmodel.LedgerSnapshot
+import kotlinx.coroutines.launch
 import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
@@ -111,7 +125,9 @@ import java.util.Locale
 fun VoiceCommandSheet(
     snapshot: LedgerSnapshot,
     voiceState: AsyncUiState<VoiceExecutionResult>,
+    localAiState: LocalAiEngineState,
     initialGroupId: String?,
+    onInstallWhistle: () -> Unit,
     onProcessAudio: (wavBytes: ByteArray, targetGroupId: String?, autoApply: Boolean) -> Unit,
     onParseCommand: (transcript: String, targetGroupId: String?, autoApply: Boolean) -> Unit,
     onCommitPending: (result: VoiceExecutionResult, overrideTitle: String?, overrideGroupId: String?) -> Unit,
@@ -123,12 +139,23 @@ fun VoiceCommandSheet(
     val context = LocalContext.current
     val tokens = SplitFlowThemeTokens.colors
     val haptics = LocalHapticFeedback.current
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val focusManager = LocalFocusManager.current
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val scrollState = rememberScrollState()
+    val uiScope = rememberCoroutineScope()
 
     val audioRecorder = remember { VoiceAudioRecorder() }
-    val isRecording by audioRecorder.isRecording.collectAsStateWithLifecycle()
-    val liveAmplitude by audioRecorder.amplitude.collectAsStateWithLifecycle()
+    val isWavRecording by audioRecorder.isRecording.collectAsStateWithLifecycle()
+    val wavAmplitude by audioRecorder.amplitude.collectAsStateWithLifecycle()
     val elapsedSeconds by audioRecorder.elapsedSeconds.collectAsStateWithLifecycle()
+
+    var isLiveSpeechListening by remember { mutableStateOf(false) }
+    var liveSpeechAmplitude by remember { mutableStateOf(0.1f) }
+    var speechRecognizer by remember { mutableStateOf<SpeechRecognizer?>(null) }
+
+    val isListeningActive = isWavRecording || isLiveSpeechListening
+    val activeAmplitude = if (isWavRecording) wavAmplitude else liveSpeechAmplitude
 
     // Default to explicit initialGroupId or Personal (null) so "Tanmay owes me 500" stays 1-on-1 Personal
     var selectedGroupId by remember(initialGroupId) { mutableStateOf(initialGroupId) }
@@ -139,7 +166,7 @@ fun VoiceCommandSheet(
     var editableTitle by remember { mutableStateOf("") }
     var showEditDetails by remember { mutableStateOf(false) }
 
-    // On-device TextToSpeech for crisp AI voice responses
+    // On-device TextToSpeech for spoken confirmations
     var ttsEngine by remember { mutableStateOf<TextToSpeech?>(null) }
     var ttsReady by remember { mutableStateOf(false) }
     DisposableEffect(context) {
@@ -153,12 +180,14 @@ fun VoiceCommandSheet(
         ttsEngine = instance
         onDispose {
             audioRecorder.release()
+            runCatching { speechRecognizer?.destroy() }
+            speechRecognizer = null
             instance.stop()
             instance.shutdown()
         }
     }
 
-    // Sync editable fields & speak AI reply when a new result arrives
+    // Sync editable fields, scroll result into view & speak reply when a new result arrives
     LaunchedEffect(voiceState) {
         if (voiceState is AsyncUiState.Success) {
             val res = voiceState.data
@@ -178,29 +207,132 @@ fun VoiceCommandSheet(
         }
     }
 
+    val submitTypedCommand: () -> Unit = {
+        val cleaned = typedCommand.trim()
+        haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+        if (cleaned.isBlank()) {
+            micNotice = "Type a command like \"Tanmay owes me 500 rupees\" first."
+        } else {
+            micNotice = null
+            ttsEngine?.stop()
+            if (isWavRecording) audioRecorder.cancelRecording()
+            if (isLiveSpeechListening) {
+                runCatching { speechRecognizer?.stopListening() }
+                isLiveSpeechListening = false
+            }
+            keyboardController?.hide()
+            focusManager.clearFocus()
+            onParseCommand(cleaned, selectedGroupId, autoApplyToLedger)
+            uiScope.launch { scrollState.animateScrollTo(0) }
+        }
+    }
+
+    val stopLiveSpeech: () -> Unit = {
+        runCatching { speechRecognizer?.stopListening() }
+        isLiveSpeechListening = false
+        liveSpeechAmplitude = 0f
+    }
+
+    val startDeviceSpeechFallback: () -> Unit = {
+        if (!SpeechRecognizer.isRecognitionAvailable(context)) {
+            micNotice = "Install Cactus Whistle (~17 MB) above for offline voice, or type your command below."
+        } else {
+            val recognizer = speechRecognizer ?: SpeechRecognizer.createSpeechRecognizer(context).also {
+                speechRecognizer = it
+            }
+            recognizer.setRecognitionListener(object : RecognitionListener {
+                override fun onReadyForSpeech(params: Bundle?) {
+                    isLiveSpeechListening = true
+                    micNotice = null
+                }
+                override fun onBeginningOfSpeech() {
+                    isLiveSpeechListening = true
+                }
+                override fun onRmsChanged(rmsdB: Float) {
+                    liveSpeechAmplitude = ((rmsdB + 2f) / 12f).coerceIn(0.08f, 1f)
+                }
+                override fun onBufferReceived(buffer: ByteArray?) = Unit
+                override fun onEndOfSpeech() {
+                    isLiveSpeechListening = false
+                }
+                override fun onError(error: Int) {
+                    isLiveSpeechListening = false
+                    liveSpeechAmplitude = 0f
+                    micNotice = if (error == SpeechRecognizer.ERROR_NO_MATCH || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) {
+                        "Didn't catch that clearly — tap the mic again or type below."
+                    } else {
+                        "Device speech listener unavailable (code $error). Install Cactus Whistle above or type below."
+                    }
+                }
+                override fun onResults(results: Bundle?) {
+                    isLiveSpeechListening = false
+                    liveSpeechAmplitude = 0f
+                    val heard = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.trim()
+                    if (!heard.isNullOrBlank()) {
+                        typedCommand = heard
+                        onParseCommand(heard, selectedGroupId, autoApplyToLedger)
+                    } else {
+                        micNotice = "Heard nothing clearly — try speaking again or type below."
+                    }
+                }
+                override fun onPartialResults(partialResults: Bundle?) {
+                    val partial = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.trim()
+                    if (!partial.isNullOrBlank()) {
+                        typedCommand = partial
+                    }
+                }
+                override fun onEvent(eventType: Int, params: Bundle?) = Unit
+            })
+            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+                putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
+            }
+            runCatching {
+                isLiveSpeechListening = true
+                recognizer.startListening(intent)
+            }.onFailure {
+                isLiveSpeechListening = false
+                micNotice = "Could not start voice listener. Install Cactus Whistle or type below."
+            }
+        }
+    }
+
     val startListeningNow: () -> Unit = {
         micNotice = null
         ttsEngine?.stop()
         onResetVoice()
         haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-        audioRecorder.startRecording(
-            onAutoStop = { wavBytes ->
-                onProcessAudio(wavBytes, selectedGroupId, autoApplyToLedger)
-            },
-            onError = { err ->
-                micNotice = err
-            }
-        )
+        if (localAiState.isWhistleReady) {
+            audioRecorder.startRecording(
+                onAutoStop = { wavBytes ->
+                    onProcessAudio(wavBytes, selectedGroupId, autoApplyToLedger)
+                },
+                onError = { err ->
+                    micNotice = err
+                }
+            )
+        } else {
+            startDeviceSpeechFallback()
+        }
     }
 
     val stopAndSendAudio: () -> Unit = {
         haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-        val wavBytes = audioRecorder.stopRecording()
-        if (wavBytes != null && wavBytes.size > 44) {
-            micNotice = null
-            onProcessAudio(wavBytes, selectedGroupId, autoApplyToLedger)
-        } else {
-            micNotice = "Heard nothing clearly — hold or speak for a second, then tap Stop."
+        if (isWavRecording) {
+            val wavBytes = audioRecorder.stopRecording()
+            if (wavBytes != null && wavBytes.size > 44) {
+                micNotice = null
+                onProcessAudio(wavBytes, selectedGroupId, autoApplyToLedger)
+            } else {
+                micNotice = "Heard nothing clearly — speak for a second, then tap Stop."
+            }
+        } else if (isLiveSpeechListening) {
+            stopLiveSpeech()
+            if (typedCommand.isNotBlank()) {
+                onParseCommand(typedCommand.trim(), selectedGroupId, autoApplyToLedger)
+            }
         }
     }
 
@@ -215,7 +347,7 @@ fun VoiceCommandSheet(
     }
 
     val handleMicOrbTap: () -> Unit = {
-        if (isRecording) {
+        if (isListeningActive) {
             stopAndSendAudio()
         } else {
             val hasMicPermission = ContextCompat.checkSelfPermission(
@@ -258,6 +390,7 @@ fun VoiceCommandSheet(
     ModalBottomSheet(
         onDismissRequest = {
             audioRecorder.cancelRecording()
+            stopLiveSpeech()
             ttsEngine?.stop()
             onDismiss()
         },
@@ -279,7 +412,7 @@ fun VoiceCommandSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .verticalScroll(rememberScrollState())
+                .verticalScroll(scrollState)
                 .navigationBarsPadding()
                 .imePadding()
                 .padding(horizontal = 20.dp)
@@ -287,7 +420,7 @@ fun VoiceCommandSheet(
                 .testTag("voice_command_sheet"),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            // Header: AI Voice Assistant + Spoken Reply Toggle + Close
+            // Header: Local AI Voice Assistant + Spoken Reply Toggle + Close
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -318,12 +451,12 @@ fun VoiceCommandSheet(
                     }
                     Column {
                         Text(
-                            text = "AI Voice Assistant",
+                            text = "Local Voice Assistant",
                             style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
                             color = MaterialTheme.colorScheme.onSurface
                         )
                         Text(
-                            text = "Speak naturally — Gemini updates your ledger",
+                            text = "On-device Cactus Whistle — zero cloud rate limits",
                             style = MaterialTheme.typography.bodySmall,
                             color = tokens.inkMuted
                         )
@@ -343,22 +476,105 @@ fun VoiceCommandSheet(
                             } else {
                                 Icons.AutoMirrored.Rounded.VolumeOff
                             },
-                            contentDescription = if (speakRepliesAloud) "Mute AI voice reply" else "Unmute AI voice reply",
+                            contentDescription = if (speakRepliesAloud) "Mute voice reply" else "Unmute voice reply",
                             tint = if (speakRepliesAloud) tokens.acidLime else tokens.inkMuted
                         )
                     }
                     SpringIconButton(
                         onClick = {
                             audioRecorder.cancelRecording()
+                            stopLiveSpeech()
                             ttsEngine?.stop()
                             onDismiss()
                         }
                     ) {
                         Icon(
                             imageVector = Icons.Rounded.Close,
-                            contentDescription = "Close AI voice assistant",
+                            contentDescription = "Close voice assistant",
                             tint = tokens.inkMuted
                         )
+                    }
+                }
+            }
+
+            // Cactus Whistle Local Model Control Strip
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = tokens.elevatedSurface,
+                border = BorderStroke(
+                    1.dp,
+                    if (localAiState.isWhistleReady) tokens.positive.copy(alpha = 0.45f) else tokens.hairline
+                ),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Memory,
+                        contentDescription = null,
+                        tint = if (localAiState.isWhistleReady) tokens.positive else tokens.acidLime,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = if (localAiState.isWhistleReady) {
+                                "Cactus ${localAiState.whistleActiveSlug ?: "Whistle"} · Ready"
+                            } else {
+                                "On-Device Speech Engine"
+                            },
+                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = localAiState.whistleNote,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = tokens.inkMuted
+                        )
+                    }
+                    when (localAiState.whistlePhase) {
+                        LocalModelPhase.READY -> {
+                            Surface(
+                                shape = RoundedCornerShape(999.dp),
+                                color = tokens.positiveContainer
+                            ) {
+                                Text(
+                                    text = "LOCAL",
+                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                    color = tokens.positive,
+                                    modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp)
+                                )
+                            }
+                        }
+                        LocalModelPhase.DOWNLOADING -> {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(20.dp),
+                                strokeWidth = 2.dp,
+                                color = tokens.acidLime
+                            )
+                        }
+                        LocalModelPhase.NOT_DOWNLOADED, LocalModelPhase.UNAVAILABLE -> {
+                            SpringButton(
+                                onClick = onInstallWhistle,
+                                shape = RoundedCornerShape(999.dp),
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = tokens.obsidian,
+                                    contentColor = tokens.onObsidian
+                                ),
+                                modifier = Modifier
+                                    .heightIn(min = 36.dp)
+                                    .testTag("install_whistle_button")
+                            ) {
+                                Icon(Icons.Rounded.Download, contentDescription = null, modifier = Modifier.size(14.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text("Whistle", style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold))
+                            }
+                        }
                     }
                 }
             }
@@ -368,8 +584,8 @@ fun VoiceCommandSheet(
                 shape = RoundedCornerShape(24.dp),
                 color = Color.Transparent,
                 border = BorderStroke(
-                    width = if (isRecording) 1.5.dp else 1.dp,
-                    color = if (isRecording) tokens.acidLime else tokens.hairline
+                    width = if (isListeningActive) 1.5.dp else 1.dp,
+                    color = if (isListeningActive) tokens.acidLime else tokens.hairline
                 ),
                 modifier = Modifier.fillMaxWidth()
             ) {
@@ -384,27 +600,27 @@ fun VoiceCommandSheet(
                                 )
                             )
                         )
-                        .padding(horizontal = 20.dp, vertical = 22.dp),
+                        .padding(horizontal = 20.dp, vertical = 20.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     // Pulsing AI Voice Orb
                     Box(
                         contentAlignment = Alignment.Center,
-                        modifier = Modifier.size(92.dp)
+                        modifier = Modifier.size(88.dp)
                     ) {
-                        if (isRecording) {
+                        if (isListeningActive) {
                             Box(
                                 modifier = Modifier
-                                    .size(86.dp)
-                                    .scale(orbPulse + liveAmplitude * 0.25f)
+                                    .size(84.dp)
+                                    .scale(orbPulse + activeAmplitude * 0.25f)
                                     .clip(CircleShape)
                                     .background(tokens.acidLime.copy(alpha = 0.22f))
                             )
                             Box(
                                 modifier = Modifier
-                                    .size(72.dp)
-                                    .scale(1f + liveAmplitude * 0.2f)
+                                    .size(70.dp)
+                                    .scale(1f + activeAmplitude * 0.2f)
                                     .clip(CircleShape)
                                     .border(1.5.dp, tokens.acidLime.copy(alpha = 0.6f), CircleShape)
                             )
@@ -414,18 +630,18 @@ fun VoiceCommandSheet(
                                 if (voiceState !is AsyncUiState.Loading) handleMicOrbTap()
                             },
                             shape = CircleShape,
-                            color = if (isRecording) tokens.negative else tokens.acidLime,
+                            color = if (isListeningActive) tokens.negative else tokens.acidLime,
                             pressedScale = 0.89f,
                             modifier = Modifier
-                                .size(66.dp)
+                                .size(64.dp)
                                 .testTag("voice_dictate_button")
                         ) {
                             Box(contentAlignment = Alignment.Center) {
                                 Icon(
-                                    imageVector = if (isRecording) Icons.Rounded.Stop else Icons.Rounded.Mic,
-                                    contentDescription = if (isRecording) "Stop and transcribe" else "Tap to speak",
-                                    tint = if (isRecording) Color.White else tokens.onAcidLime,
-                                    modifier = Modifier.size(30.dp)
+                                    imageVector = if (isListeningActive) Icons.Rounded.Stop else Icons.Rounded.Mic,
+                                    contentDescription = if (isListeningActive) "Stop and transcribe" else "Tap to speak",
+                                    tint = if (isListeningActive) Color.White else tokens.onAcidLime,
+                                    modifier = Modifier.size(28.dp)
                                 )
                             }
                         }
@@ -433,20 +649,21 @@ fun VoiceCommandSheet(
 
                     // Live Mic-Reactive Acid-Lime Waveform
                     AudioWaveformVisualizer(
-                        isListening = isRecording || voiceState is AsyncUiState.Loading,
+                        isListening = isListeningActive || voiceState is AsyncUiState.Loading,
                         barColor = tokens.acidLime,
                         barCount = 13,
-                        micAmplitude = if (isRecording) liveAmplitude else null,
+                        micAmplitude = if (isListeningActive) activeAmplitude else null,
                         modifier = Modifier
                             .width(108.dp)
-                            .height(34.dp)
+                            .height(32.dp)
                     )
 
                     Text(
                         text = when {
-                            isRecording -> "Listening... (${elapsedSeconds}s) — tap Stop when done"
-                            voiceState is AsyncUiState.Loading -> "Transcribing your voice & updating account..."
-                            else -> "Tap the mic & say \"Tanmay owes me 500 rupees\""
+                            isWavRecording -> "Recording for Whistle... (${elapsedSeconds}s) — tap Stop"
+                            isLiveSpeechListening -> "Listening locally... speak naturally"
+                            voiceState is AsyncUiState.Loading -> "Transcribing locally & updating account..."
+                            else -> "Tap mic or type \"Tanmay owes me 500 rupees\""
                         },
                         style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
                         color = tokens.onHero,
@@ -455,7 +672,7 @@ fun VoiceCommandSheet(
 
                     // Active recording quick controls
                     SpringAnimatedVisibility(
-                        visible = isRecording,
+                        visible = isListeningActive,
                         style = SpringVisibilityStyle.POP_SCALE,
                         label = "voice_recording_controls"
                     ) {
@@ -466,6 +683,7 @@ fun VoiceCommandSheet(
                             SpringOutlinedButton(
                                 onClick = {
                                     audioRecorder.cancelRecording()
+                                    stopLiveSpeech()
                                     micNotice = null
                                 },
                                 shape = RoundedCornerShape(999.dp),
@@ -489,6 +707,63 @@ fun VoiceCommandSheet(
                             }
                         }
                     }
+                }
+            }
+
+            // Primary Type & Send Command Bar (always visible right under the Voice Orb)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedTextField(
+                    value = typedCommand,
+                    onValueChange = {
+                        typedCommand = it
+                        if (micNotice != null) micNotice = null
+                    },
+                    placeholder = {
+                        Text(
+                            text = "Type: \"Tanmay owes me 500 rupees\"",
+                            color = tokens.inkMuted
+                        )
+                    },
+                    singleLine = true,
+                    shape = RoundedCornerShape(16.dp),
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                    keyboardActions = KeyboardActions(
+                        onSend = { submitTypedCommand() }
+                    ),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedContainerColor = tokens.elevatedSurface,
+                        unfocusedContainerColor = tokens.elevatedSurface,
+                        focusedBorderColor = focusedBorder,
+                        unfocusedBorderColor = MaterialTheme.colorScheme.outline,
+                        cursorColor = focusedBorder
+                    ),
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("voice_transcript_input")
+                )
+                SpringButton(
+                    onClick = submitTypedCommand,
+                    enabled = voiceState !is AsyncUiState.Loading,
+                    shape = RoundedCornerShape(16.dp),
+                    contentPadding = PaddingValues(0.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (typedCommand.isNotBlank()) tokens.acidLime else tokens.elevatedSurface,
+                        contentColor = if (typedCommand.isNotBlank()) tokens.onAcidLime else tokens.inkMuted
+                    ),
+                    border = if (typedCommand.isNotBlank()) null else BorderStroke(1.dp, tokens.hairline),
+                    modifier = Modifier
+                        .size(54.dp)
+                        .testTag("voice_parse_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Rounded.Send,
+                        contentDescription = "Send voice command",
+                        modifier = Modifier.size(21.dp)
+                    )
                 }
             }
 
@@ -550,7 +825,7 @@ fun VoiceCommandSheet(
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         AiShimmerSkeleton(
-                            label = "Gemini AI is transcribing & applying changes...",
+                            label = "Processing locally with Cactus Whistle...",
                             modifier = Modifier.padding(16.dp)
                         )
                     }
@@ -920,66 +1195,7 @@ fun VoiceCommandSheet(
                 }
             }
 
-            // Type-or-Speak Fallback Input Bar
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                OutlinedTextField(
-                    value = typedCommand,
-                    onValueChange = { typedCommand = it },
-                    placeholder = {
-                        Text(
-                            text = "Or type: \"Tanmay owes me 500 rupees\"",
-                            color = tokens.inkMuted
-                        )
-                    },
-                    singleLine = true,
-                    shape = RoundedCornerShape(16.dp),
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                    keyboardActions = KeyboardActions(
-                        onSend = {
-                            if (typedCommand.isNotBlank() && voiceState !is AsyncUiState.Loading) {
-                                onParseCommand(typedCommand, selectedGroupId, autoApplyToLedger)
-                            }
-                        }
-                    ),
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedContainerColor = tokens.elevatedSurface,
-                        unfocusedContainerColor = tokens.elevatedSurface,
-                        focusedBorderColor = focusedBorder,
-                        unfocusedBorderColor = MaterialTheme.colorScheme.outline,
-                        cursorColor = focusedBorder
-                    ),
-                    modifier = Modifier
-                        .weight(1f)
-                        .testTag("voice_transcript_input")
-                )
-                SpringSurface(
-                    onClick = {
-                        if (typedCommand.isNotBlank() && voiceState !is AsyncUiState.Loading) {
-                            onParseCommand(typedCommand, selectedGroupId, autoApplyToLedger)
-                        }
-                    },
-                    enabled = typedCommand.isNotBlank() && voiceState !is AsyncUiState.Loading,
-                    shape = RoundedCornerShape(16.dp),
-                    color = if (typedCommand.isNotBlank()) tokens.obsidian else tokens.elevatedSurface,
-                    border = if (typedCommand.isNotBlank()) null else BorderStroke(1.dp, tokens.hairline),
-                    modifier = Modifier
-                        .size(54.dp)
-                        .testTag("voice_parse_button")
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Rounded.Send,
-                            contentDescription = "Run AI voice command",
-                            tint = if (typedCommand.isNotBlank()) tokens.onObsidian else tokens.inkMuted,
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
-                }
-            }
+            // Quick examples follow below (Type & Send bar is mounted right beneath the Voice Orb above)
 
             // Tap-to-Try Voice Command Examples
             if (voiceState !is AsyncUiState.Success) {

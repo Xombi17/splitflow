@@ -1216,7 +1216,7 @@ private fun EditGroupMemoryDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(
-                    text = "Store persistent split rules for ${group.name} (max 400 chars). Gemini Voice Split & Receipt Lens use these automatically.",
+                    text = "Store persistent split rules for ${group.name} (max 400 chars). Local Voice Split & Receipt OCR use these automatically.",
                     style = MaterialTheme.typography.bodySmall,
                     color = tokens.inkMuted
                 )

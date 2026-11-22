@@ -1254,7 +1254,7 @@ private fun GuidedFirstSplitCard(
             GuidedStepRow(
                 icon = Icons.Rounded.QrCodeScanner,
                 title = "Scan a bill or log an expense",
-                subtitle = "Snap a receipt photo for Gemini Vision itemization or enter manually",
+                subtitle = "Snap a receipt photo for on-device Mirage OCR itemization or enter manually",
                 actionLabel = "Scan",
                 highlighted = true,
                 onClick = onScanReceipt,

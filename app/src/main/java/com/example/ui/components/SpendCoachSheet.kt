@@ -50,13 +50,25 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import com.example.model.AsyncUiState
 import com.example.model.SpendCoachReport
+import com.example.ui.motion.SpringButton
 import com.example.ui.theme.SplitFlowThemeTokens
 import com.example.ui.theme.TabularHeroStyle
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -70,8 +82,24 @@ fun SpendCoachSheet(
     onDismiss: () -> Unit
 ) {
     val tokens = SplitFlowThemeTokens.colors
+    val haptics = LocalHapticFeedback.current
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val focusManager = LocalFocusManager.current
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val scrollState = rememberScrollState()
+    val uiScope = rememberCoroutineScope()
     var followUpInput by remember { mutableStateOf("") }
+
+    val submitFollowUp: () -> Unit = {
+        val cleaned = followUpInput.trim()
+        if (cleaned.isNotBlank() && !isStreaming) {
+            haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+            keyboardController?.hide()
+            focusManager.clearFocus()
+            onAskFollowUp(cleaned)
+            uiScope.launch { scrollState.animateScrollTo(scrollState.maxValue) }
+        }
+    }
 
     LaunchedEffect(Unit) {
         if (coachState is AsyncUiState.Idle) {
@@ -87,7 +115,9 @@ fun SpendCoachSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .verticalScroll(rememberScrollState())
+                .verticalScroll(scrollState)
+                .navigationBarsPadding()
+                .imePadding()
                 .padding(horizontal = 20.dp)
                 .padding(bottom = 28.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
@@ -108,7 +138,7 @@ fun SpendCoachSheet(
                             style = MaterialTheme.typography.titleLarge,
                             color = MaterialTheme.colorScheme.onSurface
                         )
-                        AiBadge("GEMINI 3.8 FLASH")
+                        AiBadge("ON-DEVICE AI")
                     }
                     Text(
                         text = scopeLabel,
@@ -366,17 +396,15 @@ fun SpendCoachSheet(
                                 onValueChange = { followUpInput = it },
                                 placeholder = { Text("Ask about budgets, food spend, FX...") },
                                 singleLine = true,
+                                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                                keyboardActions = KeyboardActions(onSend = { submitFollowUp() }),
                                 shape = RoundedCornerShape(14.dp),
                                 modifier = Modifier
                                     .weight(1f)
                                     .testTag("coach_followup_input")
                             )
-                            Button(
-                                onClick = {
-                                    if (followUpInput.isNotBlank() && !isStreaming) {
-                                        onAskFollowUp(followUpInput)
-                                    }
-                                },
+                            SpringButton(
+                                onClick = submitFollowUp,
                                 enabled = followUpInput.isNotBlank() && !isStreaming,
                                 shape = RoundedCornerShape(14.dp),
                                 colors = ButtonDefaults.buttonColors(containerColor = tokens.aiAccent),

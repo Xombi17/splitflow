@@ -5,7 +5,8 @@ import android.graphics.Bitmap
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.example.ai.GeminiSplitService
+import com.example.ai.LocalAiEngineState
+import com.example.ai.LocalSplitAiService
 import com.example.data.DeviceContact
 import com.example.data.GuestLedgerRepository
 import com.example.data.GuestSessionStore
@@ -130,9 +131,33 @@ data class ToastBannerEvent(
 
 class SplitFlowViewModel(
     private val repository: LedgerRepository,
-    private val geminiService: GeminiSplitService,
+    private val localAiService: LocalSplitAiService,
     private val currentUserId: String
 ) : ViewModel() {
+
+    val localAiEngineState: StateFlow<LocalAiEngineState> = localAiService.engineState
+
+    fun installWhistleModel() {
+        viewModelScope.launch {
+            val ok = localAiService.downloadWhistleModel()
+            if (ok) {
+                showToast("Cactus Whistle installed on-device")
+            } else {
+                showToast(localAiEngineState.value.whistleNote)
+            }
+        }
+    }
+
+    fun installMirageModel() {
+        viewModelScope.launch {
+            val ok = localAiService.downloadMirageModel()
+            if (ok) {
+                showToast("Cactus Mirage OCR installed on-device")
+            } else {
+                showToast(localAiEngineState.value.mirageNote)
+            }
+        }
+    }
 
     private var lastDeletedExpense: ExpenseRecord? = null
 
@@ -266,7 +291,7 @@ class SplitFlowViewModel(
         viewModelScope.launch {
             _receiptLensState.value = AsyncUiState.Loading
             try {
-                val parsed = geminiService.analyzeReceipt(bitmap)
+                val parsed = localAiService.analyzeReceipt(bitmap)
                 _receiptLensState.value = AsyncUiState.Success(parsed)
             } catch (e: CancellationException) {
                 throw e
@@ -300,7 +325,7 @@ class SplitFlowViewModel(
         viewModelScope.launch {
             _voiceSplitState.value = AsyncUiState.Loading
             try {
-                val parsed = geminiService.transcribeAndParseVoiceAudio(
+                val parsed = localAiService.transcribeAndParseVoiceAudio(
                     wavAudioBytes = wavAudioBytes,
                     members = currentSnapshot.members,
                     groups = currentSnapshot.groups,
@@ -340,7 +365,7 @@ class SplitFlowViewModel(
         viewModelScope.launch {
             _voiceSplitState.value = AsyncUiState.Loading
             try {
-                val parsed = geminiService.parseVoiceCommand(
+                val parsed = localAiService.parseVoiceCommand(
                     transcript = trimmed,
                     members = currentSnapshot.members,
                     groups = currentSnapshot.groups,
@@ -619,7 +644,7 @@ class SplitFlowViewModel(
                             ReceiptPhotoStore.saveBitmap(context, pair.second)
                         }
                         try {
-                            val parsed = geminiService.analyzeReceipt(pair.second)
+                            val parsed = localAiService.analyzeReceipt(pair.second)
                             _batchItems.update { list ->
                                 list.map {
                                     if (it.id == entry.id) {
@@ -683,7 +708,7 @@ class SplitFlowViewModel(
             dateLabel = parsed.date.ifBlank { todayIso() },
             shareCode = "batch-${UUID.randomUUID().toString().take(8)}",
             aiExtracted = true,
-            aiConfidenceNote = "Batch Gemini Vision extracted ${parsed.lineItems.size} line items",
+            aiConfidenceNote = "Local OCR extracted ${parsed.lineItems.size} line items",
             settled = false,
             payers = listOf(PayerEntry(paidByMemberId, parsed.grandTotalMinor)),
             allocations = allocs,
@@ -748,7 +773,7 @@ class SplitFlowViewModel(
         viewModelScope.launch {
             _tripStoryState.value = AsyncUiState.Loading
             try {
-                val story = geminiService.generateTripStory(digest)
+                val story = localAiService.generateTripStory(digest)
                 _tripStoryState.value = AsyncUiState.Success(story)
             } catch (e: CancellationException) {
                 throw e
@@ -828,7 +853,7 @@ class SplitFlowViewModel(
         viewModelScope.launch {
             _spendCoachState.value = AsyncUiState.Loading
             try {
-                val report = geminiService.generateMonthlySpendCoach(digest)
+                val report = localAiService.generateMonthlySpendCoach(digest)
                 _spendCoachState.value = AsyncUiState.Success(report)
             } catch (e: CancellationException) {
                 throw e
@@ -853,7 +878,7 @@ class SplitFlowViewModel(
             try {
                 withTimeout(60_000L) {
                     val acc = StringBuilder()
-                    geminiService.streamCoachFollowUp(digest, trimmed).collect { chunk ->
+                    localAiService.streamCoachFollowUp(digest, trimmed).collect { chunk ->
                         acc.append(chunk)
                         _coachFollowUpAnswer.value = acc.toString()
                     }

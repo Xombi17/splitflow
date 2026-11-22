@@ -72,7 +72,13 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.material.icons.rounded.Download
+import androidx.compose.material.icons.rounded.Memory
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.foundation.layout.heightIn
 import com.example.R
+import com.example.ai.LocalAiEngineState
+import com.example.ai.LocalModelPhase
 import com.example.data.ReceiptPhotoStore
 import com.example.engine.FinanceEngine
 import com.example.model.AsyncUiState
@@ -82,6 +88,7 @@ import com.example.model.ParsedReceipt
 import com.example.model.PayerEntry
 import com.example.model.ReceiptLineItem
 import com.example.model.SplitType
+import com.example.ui.motion.SpringButton
 import com.example.ui.theme.SplitFlowThemeTokens
 import com.example.ui.theme.TabularAmountStyle
 import com.example.ui.theme.TabularSmallStyle
@@ -94,8 +101,10 @@ import java.util.UUID
 fun ExpenseLensSheet(
     snapshot: LedgerSnapshot,
     lensState: AsyncUiState<ParsedReceipt>,
+    localAiState: LocalAiEngineState,
     initialGroupId: String?,
     onAnalyzeBitmap: (Bitmap) -> Unit,
+    onInstallMirage: () -> Unit,
     onResetLens: () -> Unit,
     onSaveExpense: (ExpenseRecord) -> Unit,
     onDismiss: () -> Unit
@@ -277,7 +286,89 @@ fun ExpenseLensSheet(
                             }
                         }
                     } else {
-                        AiBadge(label = "Gemini Vision")
+                        AiBadge(label = if (localAiState.isMirageReady) "Cactus Mirage" else "Local OCR")
+                    }
+                }
+
+                // Cactus Mirage On-Device OCR Control Strip
+                Surface(
+                    shape = RoundedCornerShape(16.dp),
+                    color = tokens.elevatedSurface,
+                    border = BorderStroke(
+                        1.dp,
+                        if (localAiState.isMirageReady) tokens.positive.copy(alpha = 0.45f) else tokens.hairline
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Memory,
+                            contentDescription = null,
+                            tint = if (localAiState.isMirageReady) tokens.positive else tokens.acidLime,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = if (localAiState.isMirageReady) {
+                                    "Cactus ${localAiState.mirageActiveSlug ?: "Mirage"} OCR · Ready"
+                                } else {
+                                    "On-Device Receipt OCR"
+                                },
+                                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Text(
+                                text = localAiState.mirageNote,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = tokens.inkMuted
+                            )
+                        }
+                        when (localAiState.miragePhase) {
+                            LocalModelPhase.READY -> {
+                                Surface(
+                                    shape = RoundedCornerShape(999.dp),
+                                    color = tokens.positiveContainer
+                                ) {
+                                    Text(
+                                        text = "LOCAL",
+                                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                        color = tokens.positive,
+                                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp)
+                                    )
+                                }
+                            }
+                            LocalModelPhase.DOWNLOADING -> {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(20.dp),
+                                    strokeWidth = 2.dp,
+                                    color = tokens.acidLime
+                                )
+                            }
+                            LocalModelPhase.NOT_DOWNLOADED, LocalModelPhase.UNAVAILABLE -> {
+                                SpringButton(
+                                    onClick = onInstallMirage,
+                                    shape = RoundedCornerShape(999.dp),
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = tokens.obsidian,
+                                        contentColor = tokens.onObsidian
+                                    ),
+                                    modifier = Modifier
+                                        .heightIn(min = 36.dp)
+                                        .testTag("install_mirage_button")
+                                ) {
+                                    Icon(Icons.Rounded.Download, contentDescription = null, modifier = Modifier.size(14.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text("Mirage", style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold))
+                                }
+                            }
+                        }
                     }
                 }
 

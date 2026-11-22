@@ -88,7 +88,7 @@ private val ONBOARDING_SLIDES = listOf(
     OnboardingSlideData(
         eyebrow = "AI RECEIPT LENS & VOICE",
         title = "Scan or speak any bill in seconds",
-        description = "Point at any restaurant receipt or speak naturally. Gemini extracts line items, prorates GST & service charges, and splits every rupee fairly."
+        description = "Point at any restaurant receipt or speak naturally. On-device Cactus Whistle & Mirage OCR extract line items, prorate GST & service charges, and split every rupee locally."
     ),
     OnboardingSlideData(
         eyebrow = "TABLE & BAR STUDIO",

@@ -210,7 +210,7 @@ object CactusLocalModelManager {
                     )
                     val completion = engine.generateCompletion(
                         messages = messages,
-                        params = CactusCompletionParams(temperature = 0.1f, maxTokens = 768)
+                        params = CactusCompletionParams(temperature = 0.1, maxTokens = 768)
                     )
                     if (completion?.success == true) {
                         completion.response?.trim()?.takeIf { it.isNotEmpty() }

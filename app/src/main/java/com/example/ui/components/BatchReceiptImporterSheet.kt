@@ -222,7 +222,7 @@ fun BatchReceiptImporterSheet(
                     ) {
                         Text("Zero-friction multi-bill queue", style = MaterialTheme.typography.titleMedium)
                         Text(
-                            text = "Select 2–8 taxi, cafe, restaurant, or hotel bills from your photo library to scan them concurrently with Gemini Vision and approve each entry in one tap.",
+                            text = "Select 2–8 taxi, cafe, restaurant, or hotel bills from your photo library to scan them concurrently on-device with Cactus Mirage OCR and approve each entry in one tap.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -277,7 +277,7 @@ fun BatchReceiptImporterSheet(
                                         Column {
                                             Text(item.label, style = MaterialTheme.typography.titleSmall)
                                             Text(
-                                                "Gemini Vision extracting line items, GST & total...",
+                                                "Local Mirage OCR extracting line items, GST & total...",
                                                 style = MaterialTheme.typography.bodySmall,
                                                 color = tokens.inkMuted
                                             )

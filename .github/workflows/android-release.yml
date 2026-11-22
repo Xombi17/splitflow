@@ -52,6 +52,14 @@ jobs:
             echo "KEYSTORE_PATH=$RUNNER_TEMP/splitflow-upload.jks" >> "$GITHUB_ENV"
           fi
 
+      - name: Decode Firebase configuration
+        env:
+          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
+        run: |
+          if [ -n "$GOOGLE_SERVICES_JSON" ]; then
+            printf '%s' "$GOOGLE_SERVICES_JSON" | base64 --decode > app/google-services.json
+          fi
+
       - name: Build release APK
         env:
           STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}

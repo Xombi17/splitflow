@@ -24,6 +24,8 @@ import androidx.compose.material.icons.rounded.AccountTree
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.DocumentScanner
 import androidx.compose.material.icons.rounded.Mic
+import androidx.compose.material.icons.rounded.PersonOutline
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -32,6 +34,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -60,6 +63,7 @@ import com.example.ui.components.ContinueAsGuestButton
 import com.example.ui.components.StaggeredEntrance
 import com.example.ui.components.tactileClickable
 import com.example.ui.motion.SpringButton
+import com.example.ui.motion.SpringOutlinedButton
 import com.example.ui.theme.SplitFlowThemeTokens
 
 @Composable
@@ -76,6 +80,15 @@ fun AuthScreen(
     var isLoading by remember { mutableStateOf(false) }
     var isCheckingSilent by remember { mutableStateOf(true) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
+    val isGoogleConfigured = remember {
+        try {
+            val id = context.getString(R.string.default_web_client_id)
+            id.isNotBlank() && id != "splitflow-google-sign-in-not-configured"
+        } catch (_: Exception) {
+            false
+        }
+    }
+    var showCloudSetupDialog by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         attemptAutoSignIn(
@@ -256,67 +269,128 @@ fun AuthScreen(
                             .padding(horizontal = 24.dp, vertical = 16.dp),
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        // Primary: Google Sign-In (Cloud Sync)
-                        SpringButton(
-                            onClick = {
-                                errorMessage = null
-                                isLoading = true
-                                onGoogleSignInClicked(
-                                    context = context,
-                                    credentialManager = credentialManager,
-                                    onAuthSuccess = {
-                                        isLoading = false
-                                        onAuthSuccess()
-                                    },
-                                    onAuthError = { msg ->
-                                        isLoading = false
-                                        errorMessage = msg
-                                    },
-                                    scope = scope,
-                                    onAuthCancelled = {
-                                        isLoading = false
-                                    }
+                        if (isGoogleConfigured) {
+                            // Primary: Google Sign-In (Cloud Sync)
+                            SpringButton(
+                                onClick = {
+                                    errorMessage = null
+                                    isLoading = true
+                                    onGoogleSignInClicked(
+                                        context = context,
+                                        credentialManager = credentialManager,
+                                        onAuthSuccess = {
+                                            isLoading = false
+                                            onAuthSuccess()
+                                        },
+                                        onAuthError = { msg ->
+                                            isLoading = false
+                                            errorMessage = msg
+                                        },
+                                        scope = scope,
+                                        onAuthCancelled = {
+                                            isLoading = false
+                                        }
+                                    )
+                                },
+                                enabled = !isLoading && !isCheckingSilent,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(52.dp)
+                                    .testTag("google_sign_in_button"),
+                                shape = RoundedCornerShape(999.dp),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = tokens.obsidian,
+                                    contentColor = tokens.onObsidian
                                 )
-                            },
-                            enabled = !isLoading && !isCheckingSilent,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(52.dp)
-                                .testTag("google_sign_in_button"),
-                            shape = RoundedCornerShape(999.dp),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = tokens.obsidian,
-                                contentColor = tokens.onObsidian
+                            ) {
+                                if (isLoading || isCheckingSilent) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(20.dp),
+                                        color = tokens.onObsidian,
+                                        strokeWidth = 2.dp
+                                    )
+                                } else {
+                                    Icon(
+                                        imageVector = Icons.Rounded.AutoAwesome,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(10.dp))
+                                    Text(
+                                        text = "Sign in with Google",
+                                        style = MaterialTheme.typography.titleMedium
+                                    )
+                                }
+                            }
+
+                            // Secondary: Continue as Guest
+                            ContinueAsGuestButton(
+                                onClick = onContinueAsGuest,
+                                enabled = !isLoading
                             )
-                        ) {
-                            if (isLoading || isCheckingSilent) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(20.dp),
-                                    color = tokens.onObsidian,
-                                    strokeWidth = 2.dp
+                        } else {
+                            // Offline-First Mode: Elevate Continue as Guest as Primary Action
+                            SpringButton(
+                                onClick = onContinueAsGuest,
+                                enabled = !isLoading,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(52.dp)
+                                    .testTag("continue_as_guest_button"),
+                                shape = RoundedCornerShape(999.dp),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = tokens.obsidian,
+                                    contentColor = tokens.onObsidian
                                 )
-                            } else {
+                            ) {
                                 Icon(
-                                    imageVector = Icons.Rounded.AutoAwesome,
+                                    imageVector = Icons.Rounded.PersonOutline,
                                     contentDescription = null,
                                     modifier = Modifier.size(18.dp)
                                 )
                                 Spacer(modifier = Modifier.width(10.dp))
                                 Text(
-                                    text = "Sign in with Google",
+                                    text = "Continue as Guest (100% Offline)",
                                     style = MaterialTheme.typography.titleMedium
+                                )
+                            }
+
+                            // Secondary: Sign in with Google (explains Cloud Sync setup)
+                            SpringOutlinedButton(
+                                onClick = { showCloudSetupDialog = true },
+                                enabled = !isLoading,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(52.dp)
+                                    .testTag("google_sign_in_button"),
+                                shape = RoundedCornerShape(999.dp),
+                                border = BorderStroke(1.dp, tokens.hairline),
+                                colors = ButtonDefaults.outlinedButtonColors(
+                                    containerColor = tokens.cardSurface,
+                                    contentColor = MaterialTheme.colorScheme.onBackground
+                                )
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.AutoAwesome,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp),
+                                    tint = tokens.inkMuted
+                                )
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Text(
+                                    text = "Sign in with Google (Setup Cloud Sync)",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = tokens.inkMuted
                                 )
                             }
                         }
 
-                        // Secondary: Dedicated Continue as Guest button beneath Sign in with Google
-                        ContinueAsGuestButton(
-                            onClick = onContinueAsGuest,
-                            enabled = !isLoading
-                        )
-
                         Text(
-                            text = "Sign in with Google for isolated Cloud Firestore sync across devices, or start privately in Guest Mode—your local splits migrate automatically if you sign in later.",
+                            text = if (isGoogleConfigured) {
+                                "Sign in with Google for isolated Cloud Firestore sync across devices, or start privately in Guest Mode—your local splits migrate automatically if you sign in later."
+                            } else {
+                                "SplitFlow is ready to use 100% offline in Guest Mode. All voice recognition, AI receipt OCR, and expense splits work locally without a Google account."
+                            },
                             style = MaterialTheme.typography.labelSmall,
                             color = tokens.inkMuted,
                             textAlign = TextAlign.Center,
@@ -326,6 +400,57 @@ fun AuthScreen(
                 }
             }
         }
+    }
+
+    if (showCloudSetupDialog) {
+        AlertDialog(
+            onDismissRequest = { showCloudSetupDialog = false },
+            title = {
+                Text(
+                    text = "Google Cloud Sync Setup",
+                    style = MaterialTheme.typography.titleLarge
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "SplitFlow is fully functional offline right now! All receipt scanning, voice splits, and local ledger storage work immediately in Guest Mode.",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Text(
+                        text = "To enable Google Sign-In & multi-device Cloud Firestore sync:",
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = "1. Register package: com.aistudio.splitflow.kvnxqr in Firebase Console\n" +
+                               "2. Add SHA-1 Fingerprint:\n32:0D:0E:FA:1E:3B:08:70:88:E2:F7:41:C4:8E:33:AB:63:79:16:DD\n" +
+                               "3. Add your Web Client ID to strings.xml (default_web_client_id)",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = tokens.inkMuted
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showCloudSetupDialog = false
+                        onContinueAsGuest()
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = tokens.obsidian,
+                        contentColor = tokens.onObsidian
+                    )
+                ) {
+                    Text("Continue Offline as Guest")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showCloudSetupDialog = false }) {
+                    Text("Close")
+                }
+            }
+        )
     }
 }
 

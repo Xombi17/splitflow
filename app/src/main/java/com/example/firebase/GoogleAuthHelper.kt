@@ -44,13 +44,27 @@ fun attemptAutoSignIn(
     onUnauthenticated: () -> Unit,
     scope: CoroutineScope
 ) {
-    if (Firebase.auth.currentUser != null) {
+    val isFirebaseReady = try {
+        FirebaseApp.getApps(context).isNotEmpty()
+    } catch (_: Throwable) {
+        false
+    }
+    if (!isFirebaseReady) {
+        onUnauthenticated()
+        return
+    }
+    val auth = runCatching { Firebase.auth }.getOrNull()
+    if (auth?.currentUser != null) {
         onAuthSuccess()
         return
     }
     val clientId = try {
         context.getString(R.string.default_web_client_id)
     } catch (_: Exception) {
+        onUnauthenticated()
+        return
+    }
+    if (clientId.isBlank() || clientId == "splitflow-google-sign-in-not-configured") {
         onUnauthenticated()
         return
     }
@@ -67,10 +81,14 @@ fun attemptAutoSignIn(
             val credential = credentialManager.getCredential(context, request).credential
             if (credential is CustomCredential && credential.type == TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
                 val token = GoogleIdTokenCredential.createFrom(credential.data).idToken
-                Firebase.auth.signInWithCredential(
+                auth?.signInWithCredential(
                     GoogleAuthProvider.getCredential(token, null)
-                ).await()
-                onAuthSuccess()
+                )?.await()
+                if (auth?.currentUser != null) {
+                    onAuthSuccess()
+                } else {
+                    onUnauthenticated()
+                }
             } else {
                 onUnauthenticated()
             }
@@ -88,10 +106,23 @@ fun onGoogleSignInClicked(
     scope: CoroutineScope,
     onAuthCancelled: () -> Unit = {}
 ) {
+    val isFirebaseReady = try {
+        FirebaseApp.getApps(context).isNotEmpty()
+    } catch (_: Throwable) {
+        false
+    }
+    if (!isFirebaseReady) {
+        onAuthError("Cloud sync is not configured. SplitFlow works 100% offline in Guest Mode!")
+        return
+    }
     val clientId = try {
         context.getString(R.string.default_web_client_id)
     } catch (_: Exception) {
         onAuthError("Google Sign-In configuration missing: default_web_client_id not found")
+        return
+    }
+    if (clientId.isBlank() || clientId == "splitflow-google-sign-in-not-configured") {
+        onAuthError("Google Sign-In is not configured in this build. SplitFlow is fully active offline in Guest Mode!")
         return
     }
     val signInOption = GetSignInWithGoogleOption.Builder(serverClientId = clientId).build()
@@ -104,10 +135,15 @@ fun onGoogleSignInClicked(
             val credential = credentialManager.getCredential(activityContext, request).credential
             if (credential is CustomCredential && credential.type == TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
                 val token = GoogleIdTokenCredential.createFrom(credential.data).idToken
-                Firebase.auth.signInWithCredential(
-                    GoogleAuthProvider.getCredential(token, null)
-                ).await()
-                onAuthSuccess()
+                val auth = runCatching { Firebase.auth }.getOrNull()
+                if (auth != null) {
+                    auth.signInWithCredential(
+                        GoogleAuthProvider.getCredential(token, null)
+                    ).await()
+                    onAuthSuccess()
+                } else {
+                    onAuthError("Firebase Auth service unavailable.")
+                }
             } else {
                 onAuthError("Unexpected credential type returned by Credential Manager.")
             }
@@ -133,7 +169,7 @@ fun signOutFromSplitFlow(
             } catch (e: Exception) {
                 Log.w(AUTH_TAG, "Failed to clear credential state: ${e.message}")
             } finally {
-                Firebase.auth.signOut()
+                runCatching { Firebase.auth.signOut() }
                 onSignOutComplete()
             }
         }

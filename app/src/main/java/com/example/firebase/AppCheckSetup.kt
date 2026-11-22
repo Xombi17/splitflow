@@ -19,7 +19,21 @@ private const val RECAPTCHA_SITE_KEY_RES = "recaptcha_site_key"
 fun configureAppCheck(context: Context, intent: Intent?) {
     try {
         if (FirebaseApp.getApps(context).isEmpty()) {
-            FirebaseApp.initializeApp(context)
+            val app = runCatching { FirebaseApp.initializeApp(context) }.getOrNull()
+            if (app == null && FirebaseApp.getApps(context).isEmpty()) {
+                Log.i(TAG, "Initializing safe offline fallback FirebaseApp for offline guest mode")
+                val fallbackOptions = com.google.firebase.FirebaseOptions.Builder()
+                    .setApplicationId(context.packageName)
+                    .setProjectId("splitflow-offline")
+                    .setApiKey("AIzaSySplitFlowOfflineFallbackKey000000")
+                    .build()
+                FirebaseApp.initializeApp(context, fallbackOptions)
+            }
+        }
+
+        if (FirebaseApp.getApps(context).isEmpty()) {
+            Log.w(TAG, "FirebaseApp could not be initialized; skipping App Check.")
+            return
         }
 
         if (BuildConfig.DEBUG) {
@@ -52,10 +66,14 @@ fun configureAppCheck(context: Context, intent: Intent?) {
             if (resId != 0) {
                 val siteKey = context.getString(resId)
                 if (siteKey.isNotBlank()) {
-                    FirebaseAppCheck.getInstance().installAppCheckProviderFactory(
-                        RecaptchaAppCheckProviderFactory.getInstance(siteKey)
-                    )
-                    Log.d(TAG, "RecaptchaAppCheckProviderFactory installed.")
+                    runCatching {
+                        FirebaseAppCheck.getInstance().installAppCheckProviderFactory(
+                            RecaptchaAppCheckProviderFactory.getInstance(siteKey)
+                        )
+                        Log.d(TAG, "RecaptchaAppCheckProviderFactory installed.")
+                    }.onFailure { err ->
+                        Log.w(TAG, "Failed to install RecaptchaAppCheckProviderFactory: ${err.message}")
+                    }
                 } else {
                     Log.e(TAG, "recaptcha_site_key resource string is blank.")
                 }
@@ -63,7 +81,7 @@ fun configureAppCheck(context: Context, intent: Intent?) {
                 Log.e(TAG, "recaptcha_site_key string resource not found in package.")
             }
         }
-    } catch (e: Exception) {
+    } catch (e: Throwable) {
         Log.e(TAG, "Failed to initialize Firebase App Check", e)
     }
 }

@@ -213,11 +213,29 @@ private enum class SplitFlowTab(
 @Composable
 private fun SplitFlowRoot() {
     val context = LocalContext.current
-    val auth = remember { Firebase.auth }
+    val isFirebaseAvailable = remember {
+        try {
+            FirebaseApp.getApps(context).isNotEmpty()
+        } catch (_: Throwable) {
+            false
+        }
+    }
+    val auth = remember(isFirebaseAvailable) {
+        if (isFirebaseAvailable) {
+            try {
+                Firebase.auth
+            } catch (e: Throwable) {
+                Log.w("SplitFlowRoot", "Firebase Auth initialization failed", e)
+                null
+            }
+        } else null
+    }
     val guestSessionStore = remember(context) { GuestSessionStore(context) }
     val themePreferenceStore = remember(context) { ThemePreferenceStore(context) }
     val onboardingStore = remember(context) { OnboardingPreferenceStore(context) }
-    val currentUser by auth.authStateFlow().collectAsStateWithLifecycle(initialValue = auth.currentUser)
+    val currentUser by remember(auth) {
+        auth?.authStateFlow() ?: kotlinx.coroutines.flow.flowOf(null)
+    }.collectAsStateWithLifecycle(initialValue = auth?.currentUser)
     var isGuestMode by rememberSaveable { mutableStateOf(guestSessionStore.isGuestSessionActive()) }
     var guestSessionId by rememberSaveable { mutableStateOf(guestSessionStore.getOrCreateGuestSessionId()) }
     var isDarkMode by rememberSaveable { mutableStateOf(themePreferenceStore.isDarkMode()) }
@@ -399,12 +417,22 @@ private fun AuthenticatedSplitFlowShell(
                 val app = checkNotNull(this[APPLICATION_KEY]) {
                     "APPLICATION_KEY missing from CreationExtras"
                 }
-                val repo = if (isGuestMode) {
+                val isFirebaseReady = try {
+                    FirebaseApp.getApps(app).isNotEmpty()
+                } catch (_: Throwable) {
+                    false
+                }
+                val repo = if (isGuestMode || !isFirebaseReady) {
                     GuestLedgerRepository(app)
                 } else {
-                    val databaseId = app.getString(R.string.firestore_database_id)
-                    val db = FirebaseFirestore.getInstance(databaseId)
-                    SplitFlowRepository(db)
+                    try {
+                        val databaseId = app.getString(R.string.firestore_database_id)
+                        val db = FirebaseFirestore.getInstance(databaseId)
+                        SplitFlowRepository(db)
+                    } catch (e: Throwable) {
+                        Log.w("SplitFlowShell", "Firestore initialization failed, using GuestLedgerRepository", e)
+                        GuestLedgerRepository(app)
+                    }
                 }
                 SplitFlowViewModel(
                     repository = repo,

@@ -29,16 +29,19 @@ import java.util.UUID
 
 class SplitFlowRepository(
     private val db: FirebaseFirestore,
-    private val auth: FirebaseAuth = Firebase.auth
+    private val auth: FirebaseAuth? = runCatching { Firebase.auth }.getOrNull()
 ) : LedgerRepository {
     constructor(context: Context) : this(
-        FirebaseFirestore.getInstance(
-            context.applicationContext.getString(R.string.firestore_database_id)
-        )
+        db = runCatching {
+            FirebaseFirestore.getInstance(
+                context.applicationContext.getString(R.string.firestore_database_id)
+            )
+        }.getOrElse { FirebaseFirestore.getInstance() },
+        auth = runCatching { Firebase.auth }.getOrNull()
     )
 
     private fun requireUserId(expectedUserId: String? = null): String {
-        val uid = auth.currentUser?.uid
+        val uid = auth?.currentUser?.uid
             ?: throw IllegalStateException("User must be signed in with Google before accessing Firestore.")
         if (expectedUserId != null) {
             check(uid == expectedUserId) { "Signed-in user changed; refusing cross-user access." }

@@ -79,6 +79,8 @@ jobs:
         run: |
           if [ -n "$GOOGLE_SERVICES_JSON" ]; then
             printf '%s' "$GOOGLE_SERVICES_JSON" | base64 --decode > app/google-services.json
+          elif [ -f app/google-services.json ]; then
+            echo "Using committed offline fallback app/google-services.json"
           fi
 
       - name: Build release APK

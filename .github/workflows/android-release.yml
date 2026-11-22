@@ -75,7 +75,12 @@ jobs:
           if [ -z "$TAG" ] || [ "$TAG" = "main" ]; then
             TAG="build-${GITHUB_SHA::7}"
           fi
-          cp app/build/outputs/apk/release/app-release.apk "SplitFlow-${TAG}-release.apk"
+          APK="$(find app/build/outputs/apk/release -maxdepth 1 -name 'app-release*.apk' -print -quit)"
+          if [ -z "$APK" ]; then
+            echo "Release APK was not produced" >&2
+            exit 1
+          fi
+          cp "$APK" "SplitFlow-${TAG}-release.apk"
           sha256sum "SplitFlow-${TAG}-release.apk" > "SplitFlow-${TAG}-release.apk.sha256"
           echo "RELEASE_TAG=$TAG" >> "$GITHUB_ENV"
 

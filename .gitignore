@@ -20,3 +20,5 @@ debug.keystore
 *.keystore.base64
 *.jks
 *-debug.log
+
+brag-output/

@@ -162,12 +162,11 @@ fun VoiceCommandSheet(
     val isListeningActive = isWavRecording || isLiveSpeechListening
     val activeAmplitude = if (isWavRecording) wavAmplitude else liveSpeechAmplitude
 
-    // Default to Live Smart Speech (real-time N-best Android SpeechRecognizer) for highest name & number accuracy,
-    // while keeping Cactus Offline STT (Whistle / Whisper) selectable in 1 tap or as automatic offline fallback.
+    // Default to Cactus On-Device STT whenever ready, with automatic hydration
     var selectedGroupId by remember(initialGroupId) { mutableStateOf(initialGroupId) }
     var autoApplyToLedger by remember { mutableStateOf(true) }
     var speakRepliesAloud by remember { mutableStateOf(true) }
-    var useCactusMicMode by remember { mutableStateOf(false) }
+    var useCactusMicMode by remember(localAiState.isWhistleReady) { mutableStateOf(localAiState.isWhistleReady) }
     var livePartialTranscript by remember { mutableStateOf("") }
     var typedCommand by remember { mutableStateOf("") }
     var micNotice by remember { mutableStateOf<String?>(null) }
@@ -403,8 +402,15 @@ fun VoiceCommandSheet(
         ttsManager.stop()
         onResetVoice()
         haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-        if (useCactusMicMode && localAiState.isWhistleReady) {
+        if (localAiState.isWhistleReady) {
+            useCactusMicMode = true
             startCactusOfflineRecorder()
+        } else if (localAiState.whistlePhase == LocalModelPhase.DOWNLOADING) {
+            micNotice = "On-device voice model is downloading. Please wait a moment..."
+        } else if (useCactusMicMode || !SpeechRecognizer.isRecognitionAvailable(context)) {
+            // Need Cactus offline model — initiate 1-tap download
+            onInstallWhistle("whisper-tiny")
+            micNotice = "Downloading Cactus offline voice model (Whisper Tiny)..."
         } else {
             startDeviceSpeechRecognizer()
         }
@@ -784,12 +790,37 @@ fun VoiceCommandSheet(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    // Mic Engine Switcher Pill: Live Smart Speech (Primary) vs Cactus Offline STT
+                    // Mic Engine Switcher Pill: On-Device Cactus (Primary) vs Live Speech Fallback
                     Row(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        val cactusSelected = useCactusMicMode && localAiState.isWhistleReady
+                        val cactusSelected = useCactusMicMode || localAiState.isWhistleReady
+                        Surface(
+                            shape = RoundedCornerShape(999.dp),
+                            color = if (cactusSelected) tokens.acidLime else tokens.onHero.copy(alpha = 0.10f),
+                            border = BorderStroke(
+                                1.dp,
+                                if (cactusSelected) tokens.acidLime else tokens.onHero.copy(alpha = 0.20f)
+                            ),
+                            modifier = Modifier
+                                .springClickable(enabled = !isListeningActive) {
+                                    if (localAiState.isWhistleReady) {
+                                        useCactusMicMode = true
+                                        micNotice = null
+                                    } else {
+                                        onInstallWhistle("whisper-tiny")
+                                    }
+                                }
+                                .testTag("mic_mode_cactus_pill")
+                        ) {
+                            Text(
+                                text = if (localAiState.isWhistleReady) "On-Device (Cactus)" else "Get Offline Model",
+                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                color = if (cactusSelected) tokens.onAcidLime else tokens.onHero.copy(alpha = 0.85f),
+                                modifier = Modifier.padding(horizontal = 11.dp, vertical = 5.dp)
+                            )
+                        }
                         Surface(
                             shape = RoundedCornerShape(999.dp),
                             color = if (!cactusSelected) tokens.acidLime else tokens.onHero.copy(alpha = 0.10f),
@@ -805,34 +836,9 @@ fun VoiceCommandSheet(
                                 .testTag("mic_mode_device_pill")
                         ) {
                             Text(
-                                text = "Live Smart Speech",
+                                text = "System Speech",
                                 style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
                                 color = if (!cactusSelected) tokens.onAcidLime else tokens.onHero.copy(alpha = 0.85f),
-                                modifier = Modifier.padding(horizontal = 11.dp, vertical = 5.dp)
-                            )
-                        }
-                        Surface(
-                            shape = RoundedCornerShape(999.dp),
-                            color = if (cactusSelected) tokens.acidLime else tokens.onHero.copy(alpha = 0.10f),
-                            border = BorderStroke(
-                                1.dp,
-                                if (cactusSelected) tokens.acidLime else tokens.onHero.copy(alpha = 0.20f)
-                            ),
-                            modifier = Modifier
-                                .springClickable(enabled = !isListeningActive) {
-                                    if (localAiState.isWhistleReady) {
-                                        useCactusMicMode = true
-                                        micNotice = null
-                                    } else {
-                                        onInstallWhistle(null)
-                                    }
-                                }
-                                .testTag("mic_mode_cactus_pill")
-                        ) {
-                            Text(
-                                text = if (localAiState.isWhistleReady) "Whistle Offline" else "Get Whistle",
-                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
-                                color = if (cactusSelected) tokens.onAcidLime else tokens.onHero.copy(alpha = 0.85f),
                                 modifier = Modifier.padding(horizontal = 11.dp, vertical = 5.dp)
                             )
                         }

@@ -85,8 +85,8 @@ data class LocalAiEngineState(
  */
 object CactusLocalModelManager {
 
-    // Always try Whistle first; if the SDK catalog only provides compatible Cactus STT weights, pick the single best balance automatically
-    private val defaultSttCandidates = listOf("whistle", "whisper-base", "whisper-small", "whisper-tiny")
+    // Verified STT candidates pinned to fast, lightweight models (whisper-tiny primary for offline voice)
+    private val defaultSttCandidates = listOf("whisper-tiny", "whisper-base", "whisper-small")
     private val defaultVisionCandidates = listOf("mirage", "lfm2-vl-450m")
 
     private val sttLock = Mutex()
@@ -156,7 +156,18 @@ object CactusLocalModelManager {
                     isDownloaded = downloaded
                 )
             }.sortedWith(voiceModelComparator())
-        }.getOrDefault(emptyList())
+        }.getOrElse {
+            // Offline catalog fallback: check verified candidates directly on-device
+            defaultSttCandidates.map { slug ->
+                val downloaded = runCatching { CactusSTT().isModelDownloaded(slug) }.getOrDefault(false)
+                CatalogModelOption(
+                    slug = slug,
+                    displayName = formatModelLabel(slug),
+                    sizeMb = if (slug == "whisper-tiny") 39 else 142,
+                    isDownloaded = downloaded
+                )
+            }
+        }
 
         val visionCatalog = runCatching {
             val lm = CactusLM()
@@ -263,7 +274,6 @@ object CactusLocalModelManager {
             val errors = mutableListOf<String>()
             val candidateSlugs = linkedSetOf<String>()
             preferredSlug?.takeIf { it.isNotBlank() }?.let { candidateSlugs.add(it) }
-            candidateSlugs.add("whistle")
 
             val catalogModels = runCatching {
                 CactusSTT().getVoiceModels()
@@ -275,7 +285,7 @@ object CactusLocalModelManager {
                 val options = catalogModels.map { m ->
                     CatalogModelOption(
                         slug = m.slug,
-                        displayName = "Cactus Whistle",
+                        displayName = formatModelLabel(m.slug),
                         sizeMb = m.size_mb,
                         isDownloaded = m.isDownloaded
                     )
@@ -380,67 +390,33 @@ object CactusLocalModelManager {
                 val isWhisperModel = activeSlug.lowercase(Locale.US).contains("whisper")
                 val primaryPrompt = if (isWhisperModel) WHISPER_EN_PROMPT else ""
 
-                // Helper that runs a single CactusSTT pass and merges result.text with streamed onToken chunks
-                suspend fun runSinglePass(
-                    filePathArg: String?,
-                    audioBufArg: ByteArray?,
-                    promptArg: String
-                ): String? {
+                try {
                     val streamed = StringBuilder()
                     val result = engine.transcribe(
-                        filePath = filePathArg,
-                        prompt = promptArg,
+                        filePath = wavFile.absolutePath,
+                        prompt = primaryPrompt,
                         params = CactusTranscriptionParams(maxTokens = 128),
                         onToken = { token, _ -> streamed.append(token) },
-                        mode = TranscriptionMode.LOCAL,
-                        audioBuffer = audioBufArg
+                        mode = TranscriptionMode.LOCAL
                     )
                     val candidate = result?.text?.takeIf { it.isNotBlank() }
                         ?: streamed.toString().takeIf { it.isNotBlank() }
-                    return cleanAsrTranscript(candidate)
-                }
-
-                try {
-                    // Pass 1: WAV file with model-appropriate prompt
-                    var text = runSinglePass(
-                        filePathArg = wavFile.absolutePath,
-                        audioBufArg = null,
-                        promptArg = primaryPrompt
-                    )
-
-                    // Pass 2: Raw 16kHz PCM audioBuffer directly (in case native WAV reader dropped frames)
-                    if (text.isNullOrBlank() && rawPcm.isNotEmpty()) {
-                        text = runSinglePass(
-                            filePathArg = null,
-                            audioBufArg = rawPcm,
-                            promptArg = primaryPrompt
-                        )
-                    }
-
-                    // Pass 3: Alternative prompt mode (empty prompt for Whistle / English prompt for Whisper)
-                    if (text.isNullOrBlank()) {
-                        val altPrompt = if (primaryPrompt.isEmpty()) WHISPER_EN_PROMPT else ""
-                        text = runSinglePass(
-                            filePathArg = wavFile.absolutePath,
-                            audioBufArg = null,
-                            promptArg = altPrompt
-                        )
-                    }
+                    val text = cleanAsrTranscript(candidate)
 
                     val elapsedMs = (System.currentTimeMillis() - startMs).coerceAtLeast(1L)
                     if (!text.isNullOrBlank()) {
                         recordVoiceEngineRun(
-                            label = "Cactus Whistle",
+                            label = "Cactus On-Device ($activeSlug)",
                             kind = ActiveEngineKind.CACTUS_PRIMARY,
                             detail = "Transcribed offline in ${elapsedMs}ms"
                         )
                         _state.update { it.copy(whistleError = null) }
                         text
                     } else {
-                        val errMsg = "Cactus Whistle couldn't catch clear words (${audioStats.durationMs}ms clip, level ${audioStats.peakPercent}%). Try Live Speech or speak closer to the mic."
+                        val errMsg = "Couldn't catch clear words (${audioStats.durationMs}ms clip, level ${audioStats.peakPercent}%). Try speaking closer to the mic or type below."
                         _state.update { it.copy(whistleError = errMsg) }
                         recordVoiceEngineRun(
-                            label = "Cactus Whistle",
+                            label = "Cactus On-Device",
                             kind = ActiveEngineKind.CACTUS_PRIMARY,
                             detail = "No speech decoded (${audioStats.durationMs}ms)"
                         )
@@ -634,8 +610,8 @@ object CactusLocalModelManager {
         var peakAbs = 0
         for (i in 0 until sampleCount) {
             val lo = pcmBytes[i * 2].toInt() and 0xFF
-            val hi = pcmBytes[i * 2 + 1].toInt()
-            val sample = (hi shl 8) or lo
+            val hi = pcmBytes[i * 2 + 1].toInt() and 0xFF
+            val sample = ((hi shl 8) or lo).toShort().toInt()
             val v = abs(sample)
             if (v > peakAbs) peakAbs = v
         }

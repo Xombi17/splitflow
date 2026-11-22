@@ -147,8 +147,8 @@ class VoiceAudioRecorder {
                         val elapsedSec = (elapsedMs / 1000L).toInt()
                         _elapsedSeconds.value = elapsedSec
 
-                        // Ignore initial 180ms tap sound before tracking speech activity
-                        if (elapsedMs > 180L && rms >= VAD_SPEECH_RMS_THRESHOLD) {
+                        // Ignore initial 40ms tap transient before tracking speech activity (preserves initial syllable)
+                        if (elapsedMs > 40L && rms >= VAD_SPEECH_RMS_THRESHOLD) {
                             if (!hasHeardSpeech) {
                                 hasHeardSpeech = true
                             }
@@ -240,8 +240,8 @@ class VoiceAudioRecorder {
         val rawCount = pcmBytes.size / 2
         if (rawCount <= 0) return pcmBytes
 
-        // Trim button-tap clicks at edges if clip > 0.6s
-        val trimStart = if (rawCount > SAMPLE_RATE_HZ * 6 / 10) EDGE_CLICK_TRIM_SAMPLES else 0
+        // Preserve start of speech so initial syllables ("Tanmay", "Paid") are never clipped; trim release click only
+        val trimStart = 0
         val trimEnd = if (rawCount > SAMPLE_RATE_HZ * 6 / 10) rawCount - EDGE_CLICK_TRIM_SAMPLES else rawCount
         val count = (trimEnd - trimStart).coerceAtLeast(1)
 
@@ -250,8 +250,8 @@ class VoiceAudioRecorder {
         for (i in 0 until count) {
             val srcIdx = (trimStart + i) * 2
             val lo = pcmBytes[srcIdx].toInt() and 0xFF
-            val hi = pcmBytes[srcIdx + 1].toInt()
-            val v = ((hi shl 8) or lo).toFloat()
+            val hi = pcmBytes[srcIdx + 1].toInt() and 0xFF
+            val v = ((hi shl 8) or lo).toShort().toFloat()
             samples[i] = v
             meanSum += v
         }
@@ -318,12 +318,11 @@ class VoiceAudioRecorder {
             1f
         }
 
-        val totalSamples = PAD_SILENCE_SAMPLES + activeLen + PAD_SILENCE_SAMPLES
-        val out = ByteArray(totalSamples * 2)
-        val startOffset = PAD_SILENCE_SAMPLES * 2
+        // Clean natural context without synthetic zero-padding (which triggers Whisper hallucination)
+        val out = ByteArray(activeLen * 2)
         for (i in 0 until activeLen) {
             val scaled = (samples[activeStart + i] * gain).roundToInt().coerceIn(-32_767, 32_767)
-            val dst = startOffset + i * 2
+            val dst = i * 2
             out[dst] = (scaled and 0xFF).toByte()
             out[dst + 1] = ((scaled shr 8) and 0xFF).toByte()
         }

@@ -34,6 +34,7 @@ object LocalVoiceParser {
         "tea", "chai", "drinks", "food", "groceries", "grocery", "cab", "taxi", "uber", "ola",
         "auto", "flight", "hotel", "villa", "rent", "wifi", "electricity", "movie", "tickets",
         "shopping", "snacks", "party", "trip", "pizza", "burger", "beer", "cafe",
+        "swiggy", "zomato", "dhaba", "petrol", "fuel", "each",
         "except", "skipped", "without", "excluding", "just", "only", "please", "add", "log",
         "record", "hey", "hi", "hello", "ok", "okay", "has", "have", "needs", "need", "will",
         "was", "were", "is", "are", "been", "today", "yesterday", "tonight", "now", "here",
@@ -573,7 +574,7 @@ object LocalVoiceParser {
     }
 
     private fun detectCategory(lower: String): ExpenseCategory = when {
-        listOf("dinner", "lunch", "breakfast", "coffee", "tea", "chai", "cafe", "pizza", "burger", "food", "drinks", "beer", "bar", "snacks", "meal", "restaurant")
+        listOf("dinner", "lunch", "breakfast", "coffee", "tea", "chai", "cafe", "pizza", "burger", "food", "drinks", "beer", "bar", "snacks", "meal", "restaurant", "swiggy", "zomato", "dhaba")
             .any { lower.contains(it) } -> ExpenseCategory.FOOD
         listOf("cab", "taxi", "uber", "ola", "auto", "flight", "train", "bus", "petrol", "fuel", "metro", "toll")
             .any { lower.contains(it) } -> ExpenseCategory.TRAVEL

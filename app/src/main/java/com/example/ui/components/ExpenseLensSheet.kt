@@ -105,7 +105,7 @@ fun ExpenseLensSheet(
     localAiState: LocalAiEngineState,
     initialGroupId: String?,
     onAnalyzeBitmap: (Bitmap) -> Unit,
-    onInstallMirage: () -> Unit,
+    onInstallMirage: (preferredSlug: String?) -> Unit,
     onResetLens: () -> Unit,
     onSaveExpense: (ExpenseRecord) -> Unit,
     onDismiss: () -> Unit
@@ -365,7 +365,7 @@ fun ExpenseLensSheet(
                                 }
                                 LocalModelPhase.NOT_DOWNLOADED, LocalModelPhase.UNAVAILABLE -> {
                                     SpringButton(
-                                        onClick = onInstallMirage,
+                                        onClick = { onInstallMirage(null) },
                                         shape = RoundedCornerShape(999.dp),
                                         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                                         colors = ButtonDefaults.buttonColors(
@@ -381,6 +381,46 @@ fun ExpenseLensSheet(
                                         Text(
                                             text = if (localAiState.miragePhase == LocalModelPhase.UNAVAILABLE) "Retry" else "Mirage",
                                             style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        // Selectable Cactus Mirage / Vision OCR Model Chips
+                        if (localAiState.availableVisionModels.isNotEmpty()) {
+                            FlowRow(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                localAiState.availableVisionModels.take(4).forEach { model ->
+                                    val isActive = localAiState.isMirageReady && localAiState.mirageActiveSlug == model.slug
+                                    val isBusy = localAiState.miragePhase == LocalModelPhase.DOWNLOADING
+                                    Surface(
+                                        shape = RoundedCornerShape(999.dp),
+                                        color = if (isActive) tokens.acidLime else tokens.cardSurface,
+                                        border = BorderStroke(
+                                            1.dp,
+                                            if (isActive) tokens.acidLime else tokens.hairline
+                                        ),
+                                        modifier = Modifier
+                                            .clickable(enabled = !isBusy && !isActive) {
+                                                onInstallMirage(model.slug)
+                                            }
+                                            .testTag("vision_model_chip_${model.slug}")
+                                    ) {
+                                        Text(
+                                            text = buildString {
+                                                append(model.slug)
+                                                if (model.sizeMb > 0) append(" · ${model.sizeMb}MB")
+                                                if (isActive) append(" ✓")
+                                            },
+                                            style = MaterialTheme.typography.labelSmall.copy(
+                                                fontWeight = if (isActive) FontWeight.Bold else FontWeight.Medium
+                                            ),
+                                            color = if (isActive) tokens.onAcidLime else tokens.inkMuted,
+                                            modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp)
                                         )
                                     }
                                 }

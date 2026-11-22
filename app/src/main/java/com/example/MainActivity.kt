@@ -180,6 +180,7 @@ import com.example.viewmodel.SplitFlowViewModel
 import com.google.firebase.Firebase
 import com.google.firebase.auth.auth
 import com.google.firebase.firestore.FirebaseFirestore
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -237,6 +238,13 @@ private fun SplitFlowRoot() {
         themePreferenceStore.setDarkMode(dark)
     }
 
+    val onboardingAiState by CactusLocalModelManager.state.collectAsStateWithLifecycle()
+    val rootScope = rememberCoroutineScope()
+
+    LaunchedEffect(Unit) {
+        CactusLocalModelManager.refreshCatalogAndHydrate(context)
+    }
+
     LaunchedEffect(currentUser) {
         if (currentUser != null && isGuestMode) {
             guestSessionStore.endGuestSession()
@@ -266,6 +274,22 @@ private fun SplitFlowRoot() {
                         stage == "onboarding" -> {
                             OnboardingScreen(
                                 isReplay = isReplayingOnboarding,
+                                localAiState = onboardingAiState,
+                                onDownloadVoiceModel = { slug ->
+                                    rootScope.launch {
+                                        CactusLocalModelManager.prepareWhistle(context, slug)
+                                    }
+                                },
+                                onDownloadVisionModel = { slug ->
+                                    rootScope.launch {
+                                        CactusLocalModelManager.prepareMirage(context, slug)
+                                    }
+                                },
+                                onDownloadAllModels = {
+                                    rootScope.launch {
+                                        CactusLocalModelManager.prepareAllModels(context)
+                                    }
+                                },
                                 onComplete = {
                                     if (!hasSeenOnboarding) {
                                         hasSeenOnboarding = true
@@ -986,7 +1010,7 @@ private fun AuthenticatedSplitFlowShell(
                     localAiState = localAiEngineState,
                     initialGroupId = selectedGroupId,
                     onAnalyzeBitmap = { viewModel.analyzeReceiptBitmap(it) },
-                    onInstallMirage = { viewModel.installMirageModel() },
+                    onInstallMirage = { slug -> viewModel.installMirageModel(slug) },
                     onResetLens = { viewModel.resetReceiptLens() },
                     onSaveExpense = { record ->
                         viewModel.saveExpense(record) {
@@ -1004,7 +1028,7 @@ private fun AuthenticatedSplitFlowShell(
                     voiceState = voiceSplitState,
                     localAiState = localAiEngineState,
                     initialGroupId = if (currentTab == SplitFlowTab.GROUPS) selectedGroupId else null,
-                    onInstallWhistle = { viewModel.installWhistleModel() },
+                    onInstallWhistle = { slug -> viewModel.installWhistleModel(slug) },
                     onProcessAudio = { wavBytes, grpId, autoApply ->
                         viewModel.processVoiceAudio(wavBytes, grpId, autoApply)
                     },

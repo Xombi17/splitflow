@@ -137,9 +137,9 @@ class SplitFlowViewModel(
 
     val localAiEngineState: StateFlow<LocalAiEngineState> = localAiService.engineState
 
-    fun installWhistleModel() {
+    fun installWhistleModel(preferredSlug: String? = null) {
         viewModelScope.launch {
-            val ok = localAiService.downloadWhistleModel()
+            val ok = localAiService.downloadWhistleModel(preferredSlug)
             if (ok) {
                 val slug = localAiEngineState.value.whistleActiveSlug ?: "Whistle"
                 showToast("Cactus '$slug' ready on-device")
@@ -150,9 +150,9 @@ class SplitFlowViewModel(
         }
     }
 
-    fun installMirageModel() {
+    fun installMirageModel(preferredSlug: String? = null) {
         viewModelScope.launch {
-            val ok = localAiService.downloadMirageModel()
+            val ok = localAiService.downloadMirageModel(preferredSlug)
             if (ok) {
                 val slug = localAiEngineState.value.mirageActiveSlug ?: "Mirage"
                 showToast("Cactus '$slug' OCR ready on-device")

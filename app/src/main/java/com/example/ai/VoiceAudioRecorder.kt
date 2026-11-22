@@ -18,6 +18,8 @@ import kotlinx.coroutines.launch
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import kotlin.math.abs
+import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
 private const val TAG = "VoiceAudioRecorder"
@@ -25,11 +27,12 @@ private const val SAMPLE_RATE_HZ = 16_000
 private const val CHANNEL_CONFIG = AudioFormat.CHANNEL_IN_MONO
 private const val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
 private const val MAX_RECORD_SECONDS = 25
+private const val PAD_SILENCE_SAMPLES = SAMPLE_RATE_HZ / 4 // 250ms padding before & after speech
 
 /**
- * In-app PCM -> WAV audio recorder designed for on-device Cactus Whistle voice transcription.
- * Captures 16 kHz 16-bit mono WAV (32 KB/s, max ~800 KB for 25s) while emitting real-time
- * normalized microphone amplitude (0f..1f) for the AI Voice Orb & waveform.
+ * In-app PCM -> WAV audio recorder designed for on-device Cactus Whistle / Whisper transcription.
+ * Captures 16 kHz 16-bit mono PCM, peak-normalizes quiet recordings, and pads leading/trailing
+ * silence so local ASR models never clip the first or last words.
  */
 class VoiceAudioRecorder {
 
@@ -63,9 +66,11 @@ class VoiceAudioRecorder {
         }
         val bufferSize = (minBuf * 2).coerceAtLeast(4096)
 
+        // Prefer MIC first (includes platform mic gain on OnePlus/Realme/Xiaomi devices),
+        // falling back to VOICE_RECOGNITION if MIC cannot initialize.
         val recorder = try {
             AudioRecord(
-                MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                MediaRecorder.AudioSource.MIC,
                 SAMPLE_RATE_HZ,
                 CHANNEL_CONFIG,
                 AUDIO_FORMAT,
@@ -74,7 +79,7 @@ class VoiceAudioRecorder {
                 if (r.state == AudioRecord.STATE_INITIALIZED) r else {
                     r.release()
                     AudioRecord(
-                        MediaRecorder.AudioSource.MIC,
+                        MediaRecorder.AudioSource.VOICE_RECOGNITION,
                         SAMPLE_RATE_HZ,
                         CHANNEL_CONFIG,
                         AUDIO_FORMAT,
@@ -110,7 +115,6 @@ class VoiceAudioRecorder {
                 while (isActive && _isRecording.value) {
                     val readCount = recorder.read(readBuffer, 0, readBuffer.size)
                     if (readCount > 0) {
-                        // Compute RMS amplitude for smooth real-time AI waveform reactivity
                         var sumSquares = 0.0
                         val byteChunk = ByteArray(readCount * 2)
                         for (i in 0 until readCount) {
@@ -123,7 +127,7 @@ class VoiceAudioRecorder {
                             out.write(byteChunk)
                         }
                         val rms = sqrt(sumSquares / readCount).toFloat()
-                        val normalized = (rms / 6500f).coerceIn(0.06f, 1f)
+                        val normalized = (rms / 5500f).coerceIn(0.06f, 1f)
                         _amplitude.value = normalized
 
                         val elapsed = ((System.currentTimeMillis() - startTimeMs) / 1000L).toInt()
@@ -149,10 +153,8 @@ class VoiceAudioRecorder {
         }
     }
 
-    /** Stops recording and returns the encoded WAV bytes (or null if too short / empty). */
-    fun stopRecording(): ByteArray? {
-        return finalizeInternal()
-    }
+    /** Stops recording and returns the normalized, silence-padded WAV bytes (or null if too short). */
+    fun stopRecording(): ByteArray? = finalizeInternal()
 
     /** Cancels recording and discards audio data. */
     fun cancelRecording() {
@@ -180,19 +182,64 @@ class VoiceAudioRecorder {
 
         val stream = pcmStream
         pcmStream = null
-        val pcmBytes = if (stream != null) {
+        val rawPcm = if (stream != null) {
             synchronized(stream) { stream.toByteArray() }
         } else {
             ByteArray(0)
         }
         // Require at least ~0.25s of audio (~8 KB at 16kHz 16-bit mono)
-        if (pcmBytes.size < 4000) return null
-        return wrapPcmInWav(pcmBytes)
+        if (rawPcm.size < 4000) return null
+
+        val preparedPcm = normalizeAndPadPcm16(rawPcm)
+        return wrapPcmInWav(preparedPcm)
     }
 
     fun release() {
         cancelRecording()
         scope.cancel()
+    }
+
+    /**
+     * Peak-normalizes quiet speech recordings toward ~72% full scale (max 8x gain)
+     * and adds 250ms silence margins before & after speech for clean Whisper/Whistle decoding.
+     */
+    private fun normalizeAndPadPcm16(pcmBytes: ByteArray): ByteArray {
+        val sampleCount = pcmBytes.size / 2
+        if (sampleCount <= 0) return pcmBytes
+
+        var peakAbs = 0
+        for (i in 0 until sampleCount) {
+            val lo = pcmBytes[i * 2].toInt() and 0xFF
+            val hi = pcmBytes[i * 2 + 1].toInt()
+            val sample = (hi shl 8) or lo
+            val absVal = abs(sample)
+            if (absVal > peakAbs) peakAbs = absVal
+        }
+
+        val gain = if (peakAbs in 120..18_000) {
+            (23_500f / peakAbs.toFloat()).coerceIn(1f, 8f)
+        } else {
+            1f
+        }
+
+        val totalSamples = PAD_SILENCE_SAMPLES + sampleCount + PAD_SILENCE_SAMPLES
+        val out = ByteArray(totalSamples * 2)
+        val startByteOffset = PAD_SILENCE_SAMPLES * 2
+
+        for (i in 0 until sampleCount) {
+            val lo = pcmBytes[i * 2].toInt() and 0xFF
+            val hi = pcmBytes[i * 2 + 1].toInt()
+            val sample = (hi shl 8) or lo
+            val scaled = if (gain > 1.02f) {
+                (sample * gain).roundToInt().coerceIn(-32_767, 32_767)
+            } else {
+                sample
+            }
+            val dst = startByteOffset + i * 2
+            out[dst] = (scaled and 0xFF).toByte()
+            out[dst + 1] = ((scaled shr 8) and 0xFF).toByte()
+        }
+        return out
     }
 
     private fun wrapPcmInWav(pcmData: ByteArray): ByteArray {
@@ -203,12 +250,12 @@ class VoiceAudioRecorder {
             putInt(totalDataLen)
             put("WAVE".toByteArray(Charsets.US_ASCII))
             put("fmt ".toByteArray(Charsets.US_ASCII))
-            putInt(16) // PCM chunk size
+            putInt(16)
             putShort(1) // AudioFormat = 1 (PCM)
             putShort(1) // NumChannels = 1 (Mono)
             putInt(SAMPLE_RATE_HZ)
             putInt(byteRate)
-            putShort(2) // BlockAlign = NumChannels * BitsPerSample / 8
+            putShort(2) // BlockAlign
             putShort(16) // BitsPerSample
             put("data".toByteArray(Charsets.US_ASCII))
             putInt(pcmData.size)

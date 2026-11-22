@@ -10,6 +10,7 @@ import com.cactus.CactusLM
 import com.cactus.CactusSTT
 import com.cactus.CactusTranscriptionParams
 import com.cactus.ChatMessage
+import com.cactus.TranscriptionMode
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -20,8 +21,10 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.Locale
+import kotlin.math.abs
 
 private const val LOG_TAG = "CactusLocalModels"
+private const val WHISPER_EN_PROMPT = "<|startoftranscript|><|en|><|transcribe|><|notimestamps|>"
 
 enum class LocalModelPhase {
     NOT_DOWNLOADED,
@@ -37,10 +40,21 @@ enum class ActiveEngineKind {
     TEXT_PARSER
 }
 
+data class CatalogModelOption(
+    val slug: String,
+    val displayName: String,
+    val sizeMb: Int,
+    val isDownloaded: Boolean
+)
+
 data class LocalAiEngineState(
+    val catalogLoaded: Boolean = false,
+    val availableVoiceModels: List<CatalogModelOption> = emptyList(),
+    val availableVisionModels: List<CatalogModelOption> = emptyList(),
+
     val whistlePhase: LocalModelPhase = LocalModelPhase.NOT_DOWNLOADED,
     val whistleActiveSlug: String? = null,
-    val whistleNote: String = "Tap Install to download Cactus Whistle for offline neural STT",
+    val whistleNote: String = "Download Cactus Whistle / Whisper for offline voice",
     val whistleError: String? = null,
     val lastVoiceEngineLabel: String? = null,
     val lastVoiceEngineKind: ActiveEngineKind = ActiveEngineKind.NONE,
@@ -48,7 +62,7 @@ data class LocalAiEngineState(
 
     val miragePhase: LocalModelPhase = LocalModelPhase.NOT_DOWNLOADED,
     val mirageActiveSlug: String? = null,
-    val mirageNote: String = "Tap Install to download Cactus Mirage for local neural OCR",
+    val mirageNote: String = "Download Cactus Mirage / Vision for on-device receipt OCR",
     val mirageError: String? = null,
     val lastOcrEngineLabel: String? = null,
     val lastOcrEngineKind: ActiveEngineKind = ActiveEngineKind.NONE,
@@ -56,19 +70,23 @@ data class LocalAiEngineState(
 ) {
     val isWhistleReady: Boolean get() = whistlePhase == LocalModelPhase.READY
     val isMirageReady: Boolean get() = miragePhase == LocalModelPhase.READY
+    val isAnyDownloading: Boolean
+        get() = whistlePhase == LocalModelPhase.DOWNLOADING || miragePhase == LocalModelPhase.DOWNLOADING
+    val areBothModelsReady: Boolean get() = isWhistleReady && isMirageReady
 }
 
 /**
  * Singleton coordinator for on-device Cactus Compute inference engines:
- * - Voice STT via [CactusSTT] (prefers Whistle, then smallest available Cactus voice model such as whisper-tiny)
- * - Vision/OCR via [CactusLM] (prefers Mirage, then smallest vision-capable Cactus model)
+ * - Voice STT via [CactusSTT] (supports Whistle and Whisper models such as whisper-small / whisper-base / whisper-tiny)
+ * - Vision/OCR via [CactusLM] (prefers Mirage, then vision-capable Cactus VLM models like lfm2-vl-450m)
  *
- * Surfaces exact download, ABI, and initialization errors in [state] and records which engine
- * actually ran on every voice transcription and receipt OCR pass.
+ * Supports onboarding pre-download, automatic startup hydration of already-downloaded models,
+ * multi-pass Whisper/Whistle WAV + PCM transcription, and transparent runtime diagnostics.
  */
 object CactusLocalModelManager {
 
-    private val defaultSttCandidates = listOf("whistle", "whisper-tiny", "whisper-base")
+    // Prefer Whistle if available in SDK catalog, otherwise accurate Whisper models (base/small before tiny)
+    private val defaultSttCandidates = listOf("whistle", "whisper-base", "whisper-small", "whisper-tiny")
     private val defaultVisionCandidates = listOf("mirage", "lfm2-vl-450m")
 
     private val sttLock = Mutex()
@@ -119,10 +137,112 @@ object CactusLocalModelManager {
         }
     }
 
-    suspend fun prepareWhistle(context: Context): Boolean = withContext(Dispatchers.IO) {
+    /**
+     * Fetches the live Cactus STT & Vision model catalogs and automatically loads any
+     * model weights that were already downloaded on this device (e.g. during Onboarding).
+     */
+    suspend fun refreshCatalogAndHydrate(context: Context) = withContext(Dispatchers.IO) {
+        initContext(context)
+        if (contextInitError != null) return@withContext
+
+        val voiceCatalog = runCatching {
+            val stt = CactusSTT()
+            stt.getVoiceModels().map { m ->
+                val downloaded = runCatching { stt.isModelDownloaded(m.slug) }.getOrDefault(m.isDownloaded)
+                CatalogModelOption(
+                    slug = m.slug,
+                    displayName = formatModelLabel(m.slug),
+                    sizeMb = m.size_mb,
+                    isDownloaded = downloaded
+                )
+            }.sortedWith(voiceModelComparator())
+        }.getOrDefault(emptyList())
+
+        val visionCatalog = runCatching {
+            val lm = CactusLM()
+            lm.getModels()
+                .filter {
+                    it.supports_vision ||
+                        it.slug.lowercase(Locale.US).contains("mirage") ||
+                        it.slug.lowercase(Locale.US).contains("vl")
+                }
+                .map { m ->
+                    CatalogModelOption(
+                        slug = m.slug,
+                        displayName = m.name.ifBlank { formatModelLabel(m.slug) },
+                        sizeMb = m.size_mb,
+                        isDownloaded = m.isDownloaded
+                    )
+                }
+                .sortedWith(visionModelComparator())
+        }.getOrDefault(emptyList())
+
+        _state.update { current ->
+            val preferredVoice = voiceCatalog.firstOrNull()
+            val preferredVision = visionCatalog.firstOrNull()
+            current.copy(
+                catalogLoaded = true,
+                availableVoiceModels = voiceCatalog,
+                availableVisionModels = visionCatalog,
+                whistleNote = if (current.isWhistleReady) current.whistleNote else {
+                    preferredVoice?.let {
+                        "Recommended: ${it.slug} (${it.sizeMb} MB) · ${voiceCatalog.size} voice models available"
+                    } ?: current.whistleNote
+                },
+                mirageNote = if (current.isMirageReady) current.mirageNote else {
+                    preferredVision?.let {
+                        "Recommended: ${it.slug} (${it.sizeMb} MB) · on-device vision OCR"
+                    } ?: current.mirageNote
+                }
+            )
+        }
+
+        // Auto-initialize any already-downloaded voice model into memory without re-downloading
+        if (!_state.value.isWhistleReady) {
+            val alreadyLocalVoice = voiceCatalog.firstOrNull { it.isDownloaded }?.slug
+                ?: defaultSttCandidates.firstOrNull { slug ->
+                    runCatching { CactusSTT().isModelDownloaded(slug) }.getOrDefault(false)
+                }
+            if (alreadyLocalVoice != null) {
+                prepareWhistle(context, preferredSlug = alreadyLocalVoice)
+            }
+        }
+
+        // Auto-initialize any already-downloaded vision model into memory
+        if (!_state.value.isMirageReady) {
+            val alreadyLocalVision = visionCatalog.firstOrNull { it.isDownloaded }?.slug
+            if (alreadyLocalVision != null) {
+                prepareMirage(context, preferredSlug = alreadyLocalVision)
+            }
+        }
+    }
+
+    /**
+     * Downloads and initializes BOTH the primary Voice model (Whistle / Whisper) and
+     * the Vision OCR model (Mirage / Cactus VLM) — used by the Onboarding setup step.
+     */
+    suspend fun prepareAllModels(
+        context: Context,
+        preferredVoiceSlug: String? = null,
+        preferredVisionSlug: String? = null
+    ): Pair<Boolean, Boolean> {
+        val voiceOk = prepareWhistle(context, preferredSlug = preferredVoiceSlug)
+        val visionOk = prepareMirage(context, preferredSlug = preferredVisionSlug)
+        return voiceOk to visionOk
+    }
+
+    suspend fun prepareWhistle(
+        context: Context,
+        preferredSlug: String? = null
+    ): Boolean = withContext(Dispatchers.IO) {
         sttLock.withLock {
             val current = sttInstance
-            if (_state.value.isWhistleReady && current != null && runCatching { current.isReady() }.getOrDefault(false)) {
+            val currentSlug = _state.value.whistleActiveSlug
+            if (_state.value.isWhistleReady &&
+                current != null &&
+                (preferredSlug == null || preferredSlug == currentSlug) &&
+                runCatching { current.isReady() }.getOrDefault(false)
+            ) {
                 return@withLock true
             }
 
@@ -131,7 +251,7 @@ object CactusLocalModelManager {
                 _state.update {
                     it.copy(
                         whistlePhase = LocalModelPhase.UNAVAILABLE,
-                        whistleNote = "Cactus runtime init failed — falling back to Android SpeechRecognizer",
+                        whistleNote = "Cactus runtime init failed — using Android SpeechRecognizer",
                         whistleError = initErr
                     )
                 }
@@ -141,15 +261,15 @@ object CactusLocalModelManager {
             _state.update {
                 it.copy(
                     whistlePhase = LocalModelPhase.DOWNLOADING,
-                    whistleNote = "Checking Cactus voice model catalog...",
+                    whistleNote = "Checking Cactus Whistle / Whisper catalog...",
                     whistleError = null
                 )
             }
 
             val errors = mutableListOf<String>()
             val candidateSlugs = linkedSetOf<String>()
+            preferredSlug?.takeIf { it.isNotBlank() }?.let { candidateSlugs.add(it) }
 
-            // Discover live voice slugs supported by this Cactus SDK build first
             val catalogModels = runCatching {
                 CactusSTT().getVoiceModels()
             }.onFailure { err ->
@@ -157,25 +277,25 @@ object CactusLocalModelManager {
             }.getOrDefault(emptyList())
 
             if (catalogModels.isNotEmpty()) {
-                catalogModels
-                    .sortedWith(
-                        compareBy<com.cactus.VoiceModel>(
-                            { !it.slug.lowercase(Locale.US).contains("whistle") },
-                            { !it.slug.lowercase(Locale.US).contains("whisper-tiny") },
-                            { !it.slug.lowercase(Locale.US).contains("moonshine") },
-                            { it.size_mb }
-                        )
+                val options = catalogModels.map { m ->
+                    CatalogModelOption(
+                        slug = m.slug,
+                        displayName = formatModelLabel(m.slug),
+                        sizeMb = m.size_mb,
+                        isDownloaded = m.isDownloaded
                     )
-                    .forEach { candidateSlugs.add(it.slug) }
+                }.sortedWith(voiceModelComparator())
+                _state.update { it.copy(catalogLoaded = true, availableVoiceModels = options) }
+                options.forEach { candidateSlugs.add(it.slug) }
             }
             candidateSlugs.addAll(defaultSttCandidates)
 
-            for (slug in candidateSlugs.take(4)) {
+            for (slug in candidateSlugs.take(5)) {
                 try {
                     _state.update {
                         it.copy(
                             whistlePhase = LocalModelPhase.DOWNLOADING,
-                            whistleNote = "Downloading & initializing Cactus '$slug'..."
+                            whistleNote = "Downloading & loading Cactus '$slug'..."
                         )
                     }
                     val engine = CactusSTT()
@@ -192,16 +312,20 @@ object CactusLocalModelManager {
                     engine.initializeModel(CactusInitParams(model = slug))
                     val ready = runCatching { engine.isReady() }.getOrDefault(false)
                     if (!ready) {
-                        errors.add("'$slug': initializeModel finished but engine.isReady() is false")
+                        errors.add("'$slug': initialized but engine.isReady() is false")
                         continue
                     }
 
                     sttInstance = engine
+                    val updatedList = _state.value.availableVoiceModels.map {
+                        if (it.slug == slug) it.copy(isDownloaded = true) else it
+                    }
                     _state.update {
                         it.copy(
+                            availableVoiceModels = updatedList,
                             whistlePhase = LocalModelPhase.READY,
                             whistleActiveSlug = slug,
-                            whistleNote = "Cactus '$slug' loaded on-device",
+                            whistleNote = "Cactus '$slug' active on-device",
                             whistleError = null
                         )
                     }
@@ -242,11 +366,16 @@ object CactusLocalModelManager {
                 val ok = prepareWhistle(context)
                 if (!ok) return@withContext null
             }
+
+            val wavBytes = runCatching { wavFile.readBytes() }.getOrNull() ?: return@withContext null
+            val rawPcm = if (wavBytes.size > 44) wavBytes.copyOfRange(44, wavBytes.size) else ByteArray(0)
+            val audioStats = inspectPcmStats(rawPcm)
+
             sttLock.withLock {
                 val engine = sttInstance
-                val activeSlug = _state.value.whistleActiveSlug ?: "whistle"
+                val activeSlug = _state.value.whistleActiveSlug ?: "whisper-base"
                 if (engine == null || !runCatching { engine.isReady() }.getOrDefault(false)) {
-                    val errMsg = "Cactus STT engine '$activeSlug' is not loaded (isReady=false)."
+                    val errMsg = "Cactus STT '$activeSlug' is not loaded (isReady=false)."
                     _state.update {
                         it.copy(
                             whistlePhase = LocalModelPhase.UNAVAILABLE,
@@ -255,29 +384,74 @@ object CactusLocalModelManager {
                     }
                     return@withLock null
                 }
+
                 val startMs = System.currentTimeMillis()
-                try {
-                    val output = engine.transcribe(
-                        filePath = wavFile.absolutePath,
-                        params = CactusTranscriptionParams()
+                val isWhisperModel = activeSlug.lowercase(Locale.US).contains("whisper")
+                val primaryPrompt = if (isWhisperModel) WHISPER_EN_PROMPT else ""
+
+                // Helper that runs a single CactusSTT pass and merges result.text with streamed onToken chunks
+                suspend fun runSinglePass(
+                    filePathArg: String?,
+                    audioBufArg: ByteArray?,
+                    promptArg: String
+                ): String? {
+                    val streamed = StringBuilder()
+                    val result = engine.transcribe(
+                        filePath = filePathArg,
+                        prompt = promptArg,
+                        params = CactusTranscriptionParams(),
+                        onToken = { token, _ -> streamed.append(token) },
+                        mode = TranscriptionMode.LOCAL,
+                        audioBuffer = audioBufArg
                     )
-                    val text = output?.text?.trim().orEmpty()
+                    val candidate = result?.text?.takeIf { it.isNotBlank() }
+                        ?: streamed.toString().takeIf { it.isNotBlank() }
+                    return cleanAsrTranscript(candidate)
+                }
+
+                try {
+                    // Pass 1: WAV file with model-appropriate prompt
+                    var text = runSinglePass(
+                        filePathArg = wavFile.absolutePath,
+                        audioBufArg = null,
+                        promptArg = primaryPrompt
+                    )
+
+                    // Pass 2: Raw 16kHz PCM audioBuffer directly (in case native WAV reader dropped frames)
+                    if (text.isNullOrBlank() && rawPcm.isNotEmpty()) {
+                        text = runSinglePass(
+                            filePathArg = null,
+                            audioBufArg = rawPcm,
+                            promptArg = primaryPrompt
+                        )
+                    }
+
+                    // Pass 3: Alternative prompt mode (empty prompt for Whistle / English prompt for Whisper)
+                    if (text.isNullOrBlank()) {
+                        val altPrompt = if (primaryPrompt.isEmpty()) WHISPER_EN_PROMPT else ""
+                        text = runSinglePass(
+                            filePathArg = wavFile.absolutePath,
+                            audioBufArg = null,
+                            promptArg = altPrompt
+                        )
+                    }
+
                     val elapsedMs = (System.currentTimeMillis() - startMs).coerceAtLeast(1L)
-                    if (text.isNotEmpty()) {
+                    if (!text.isNullOrBlank()) {
                         recordVoiceEngineRun(
-                            label = "Cactus Whistle ($activeSlug)",
+                            label = "Cactus ($activeSlug)",
                             kind = ActiveEngineKind.CACTUS_PRIMARY,
                             detail = "Transcribed on-device in ${elapsedMs}ms"
                         )
                         _state.update { it.copy(whistleError = null) }
                         text
                     } else {
-                        val errMsg = "Cactus '$activeSlug' returned an empty transcript for this clip."
+                        val errMsg = "Cactus '$activeSlug' decoded no words (${audioStats.durationMs}ms clip, peak ${audioStats.peakPercent}%). Try speaking louder or switch to Live Device Mic."
                         _state.update { it.copy(whistleError = errMsg) }
                         recordVoiceEngineRun(
-                            label = "Cactus Whistle ($activeSlug)",
+                            label = "Cactus ($activeSlug)",
                             kind = ActiveEngineKind.CACTUS_PRIMARY,
-                            detail = errMsg
+                            detail = "Empty decode (${audioStats.durationMs}ms, peak ${audioStats.peakPercent}%)"
                         )
                         null
                     }
@@ -290,10 +464,18 @@ object CactusLocalModelManager {
             }
         }
 
-    suspend fun prepareMirage(context: Context): Boolean = withContext(Dispatchers.IO) {
+    suspend fun prepareMirage(
+        context: Context,
+        preferredSlug: String? = null
+    ): Boolean = withContext(Dispatchers.IO) {
         visionLock.withLock {
             val current = visionInstance
-            if (_state.value.isMirageReady && current != null && runCatching { current.isLoaded() }.getOrDefault(false)) {
+            val currentSlug = _state.value.mirageActiveSlug
+            if (_state.value.isMirageReady &&
+                current != null &&
+                (preferredSlug == null || preferredSlug == currentSlug) &&
+                runCatching { current.isLoaded() }.getOrDefault(false)
+            ) {
                 return@withLock true
             }
 
@@ -312,13 +494,14 @@ object CactusLocalModelManager {
             _state.update {
                 it.copy(
                     miragePhase = LocalModelPhase.DOWNLOADING,
-                    mirageNote = "Checking Cactus vision model catalog...",
+                    mirageNote = "Checking Cactus Mirage / Vision catalog...",
                     mirageError = null
                 )
             }
 
             val errors = mutableListOf<String>()
             val candidateSlugs = linkedSetOf<String>()
+            preferredSlug?.takeIf { it.isNotBlank() }?.let { candidateSlugs.add(it) }
 
             val catalogModels = runCatching {
                 CactusLM().getModels()
@@ -326,19 +509,29 @@ object CactusLocalModelManager {
                 errors.add("Catalog lookup failed (${err.javaClass.simpleName}: ${err.message ?: "offline"})")
             }.getOrDefault(emptyList())
 
-            catalogModels
-                .filter { it.supports_vision || it.slug.lowercase(Locale.US).contains("mirage") || it.slug.lowercase(Locale.US).contains("vl") }
-                .sortedWith(
-                    compareBy<com.cactus.CactusModel>(
-                        { !it.slug.lowercase(Locale.US).contains("mirage") },
-                        { it.size_mb }
+            val visionOptions = catalogModels
+                .filter {
+                    it.supports_vision ||
+                        it.slug.lowercase(Locale.US).contains("mirage") ||
+                        it.slug.lowercase(Locale.US).contains("vl")
+                }
+                .map { m ->
+                    CatalogModelOption(
+                        slug = m.slug,
+                        displayName = m.name.ifBlank { formatModelLabel(m.slug) },
+                        sizeMb = m.size_mb,
+                        isDownloaded = m.isDownloaded
                     )
-                )
-                .forEach { candidateSlugs.add(it.slug) }
+                }
+                .sortedWith(visionModelComparator())
 
+            if (visionOptions.isNotEmpty()) {
+                _state.update { it.copy(catalogLoaded = true, availableVisionModels = visionOptions) }
+                visionOptions.forEach { candidateSlugs.add(it.slug) }
+            }
             candidateSlugs.addAll(defaultVisionCandidates)
 
-            for (slug in candidateSlugs.take(3)) {
+            for (slug in candidateSlugs.take(4)) {
                 try {
                     _state.update {
                         it.copy(
@@ -351,13 +544,17 @@ object CactusLocalModelManager {
                     engine.initializeModel(CactusInitParams(model = slug, contextSize = 2048))
                     val loaded = runCatching { engine.isLoaded() }.getOrDefault(false)
                     if (!loaded) {
-                        errors.add("'$slug': initializeModel finished but engine.isLoaded() is false")
+                        errors.add("'$slug': initialized but engine.isLoaded() is false")
                         continue
                     }
 
                     visionInstance = engine
+                    val updatedList = _state.value.availableVisionModels.map {
+                        if (it.slug == slug) it.copy(isDownloaded = true) else it
+                    }
                     _state.update {
                         it.copy(
+                            availableVisionModels = updatedList,
                             miragePhase = LocalModelPhase.READY,
                             mirageActiveSlug = slug,
                             mirageNote = "Cactus '$slug' vision OCR active on-device",
@@ -377,7 +574,7 @@ object CactusLocalModelManager {
             }
 
             val summaryError = errors.joinToString(" | ").ifBlank {
-                "Cactus Mirage vision model could not download or initialize."
+                "Cactus Mirage / Vision model could not download or initialize."
             }
             _state.update {
                 it.copy(
@@ -422,7 +619,7 @@ object CactusLocalModelManager {
                     val elapsedMs = (System.currentTimeMillis() - startMs).coerceAtLeast(1L)
                     if (completion?.success == true && !completion.response.isNullOrBlank()) {
                         recordOcrEngineRun(
-                            label = "Cactus Mirage ($activeSlug)",
+                            label = "Cactus Vision ($activeSlug)",
                             kind = ActiveEngineKind.CACTUS_PRIMARY,
                             detail = "OCR completed on-device in ${elapsedMs}ms"
                         )
@@ -440,5 +637,53 @@ object CactusLocalModelManager {
                     null
                 }
             }
+        }
+
+    private data class PcmStats(val durationMs: Long, val peakPercent: Int)
+
+    private fun inspectPcmStats(pcmBytes: ByteArray): PcmStats {
+        val sampleCount = pcmBytes.size / 2
+        if (sampleCount <= 0) return PcmStats(0L, 0)
+        var peakAbs = 0
+        for (i in 0 until sampleCount) {
+            val lo = pcmBytes[i * 2].toInt() and 0xFF
+            val hi = pcmBytes[i * 2 + 1].toInt()
+            val sample = (hi shl 8) or lo
+            val v = abs(sample)
+            if (v > peakAbs) peakAbs = v
+        }
+        val durationMs = (sampleCount * 1000L) / 16_000L
+        val peakPct = ((peakAbs / 32_767.0) * 100.0).toInt().coerceIn(0, 100)
+        return PcmStats(durationMs, peakPct)
+    }
+
+    private fun cleanAsrTranscript(raw: String?): String? {
+        if (raw.isNullOrBlank()) return null
+        val cleaned = raw
+            .replace(Regex("<\\|[^|>]+\\|>"), " ")
+            .replace(Regex("\\[(blank_audio|silence|inaudible|music|applause|noise)]", RegexOption.IGNORE_CASE), " ")
+            .replace(Regex("\\((blank audio|silence|inaudible|music)\\)", RegexOption.IGNORE_CASE), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+        return cleaned.takeIf { it.any { ch -> ch.isLetterOrDigit() } }
+    }
+
+    private fun voiceModelComparator(): Comparator<CatalogModelOption> = compareBy(
+        { !it.slug.lowercase(Locale.US).contains("whistle") },
+        { !it.slug.lowercase(Locale.US).contains("whisper-base") },
+        { !it.slug.lowercase(Locale.US).contains("whisper-small") },
+        { !it.slug.lowercase(Locale.US).contains("whisper-tiny") },
+        { it.sizeMb }
+    )
+
+    private fun visionModelComparator(): Comparator<CatalogModelOption> = compareBy(
+        { !it.slug.lowercase(Locale.US).contains("mirage") },
+        { !it.slug.lowercase(Locale.US).contains("lfm2-vl") },
+        { it.sizeMb }
+    )
+
+    private fun formatModelLabel(slug: String): String =
+        slug.split("-", "_").joinToString(" ") { part ->
+            part.replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.US) else it.toString() }
         }
 }

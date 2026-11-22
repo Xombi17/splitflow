@@ -30,11 +30,11 @@ class LocalSplitAiService(
         CactusLocalModelManager.initContext(appContext)
     }
 
-    suspend fun downloadWhistleModel(): Boolean =
-        CactusLocalModelManager.prepareWhistle(appContext)
+    suspend fun downloadWhistleModel(preferredSlug: String? = null): Boolean =
+        CactusLocalModelManager.prepareWhistle(appContext, preferredSlug = preferredSlug)
 
-    suspend fun downloadMirageModel(): Boolean =
-        CactusLocalModelManager.prepareMirage(appContext)
+    suspend fun downloadMirageModel(preferredSlug: String? = null): Boolean =
+        CactusLocalModelManager.prepareMirage(appContext, preferredSlug = preferredSlug)
 
     suspend fun analyzeReceipt(bitmap: Bitmap): ParsedReceipt {
         return LocalReceiptOcrEngine.analyzeReceiptBitmap(appContext, bitmap)

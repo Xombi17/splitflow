@@ -32,6 +32,7 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -129,7 +130,7 @@ fun VoiceCommandSheet(
     voiceState: AsyncUiState<VoiceExecutionResult>,
     localAiState: LocalAiEngineState,
     initialGroupId: String?,
-    onInstallWhistle: () -> Unit,
+    onInstallWhistle: (preferredSlug: String?) -> Unit,
     onProcessAudio: (wavBytes: ByteArray, targetGroupId: String?, autoApply: Boolean) -> Unit,
     onParseCommand: (transcript: String, targetGroupId: String?, autoApply: Boolean, fromDeviceSpeechFallback: Boolean) -> Unit,
     onCommitPending: (result: VoiceExecutionResult, overrideTitle: String?, overrideGroupId: String?) -> Unit,
@@ -163,10 +164,17 @@ fun VoiceCommandSheet(
     var selectedGroupId by remember(initialGroupId) { mutableStateOf(initialGroupId) }
     var autoApplyToLedger by remember { mutableStateOf(true) }
     var speakRepliesAloud by remember { mutableStateOf(true) }
+    var useCactusMicMode by remember { mutableStateOf(localAiState.isWhistleReady) }
     var typedCommand by remember { mutableStateOf("") }
     var micNotice by remember { mutableStateOf<String?>(null) }
     var editableTitle by remember { mutableStateOf("") }
     var showEditDetails by remember { mutableStateOf(false) }
+
+    LaunchedEffect(localAiState.isWhistleReady) {
+        if (localAiState.isWhistleReady) {
+            useCactusMicMode = true
+        }
+    }
 
     // On-device TextToSpeech for spoken confirmations
     var ttsEngine by remember { mutableStateOf<TextToSpeech?>(null) }
@@ -306,7 +314,7 @@ fun VoiceCommandSheet(
         ttsEngine?.stop()
         onResetVoice()
         haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-        if (localAiState.isWhistleReady) {
+        if (useCactusMicMode && localAiState.isWhistleReady) {
             audioRecorder.startRecording(
                 onAutoStop = { wavBytes ->
                     onProcessAudio(wavBytes, selectedGroupId, autoApplyToLedger)
@@ -403,6 +411,7 @@ fun VoiceCommandSheet(
         dragHandle = {
             Box(
                 modifier = Modifier
+                    .statusBarsPadding()
                     .padding(top = 12.dp, bottom = 6.dp)
                     .width(40.dp)
                     .height(4.dp)
@@ -573,7 +582,7 @@ fun VoiceCommandSheet(
                             }
                             LocalModelPhase.NOT_DOWNLOADED, LocalModelPhase.UNAVAILABLE -> {
                                 SpringButton(
-                                    onClick = onInstallWhistle,
+                                    onClick = { onInstallWhistle(null) },
                                     shape = RoundedCornerShape(999.dp),
                                     contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                                     colors = ButtonDefaults.buttonColors(
@@ -589,6 +598,46 @@ fun VoiceCommandSheet(
                                     Text(
                                         text = if (localAiState.whistlePhase == LocalModelPhase.UNAVAILABLE) "Retry" else "Whistle",
                                         style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold)
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    // Selectable Cactus Voice Model Catalog Chips (switch between Whistle / Whisper Base / Small / Tiny)
+                    if (localAiState.availableVoiceModels.isNotEmpty()) {
+                        FlowRow(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            localAiState.availableVoiceModels.take(4).forEach { model ->
+                                val isActive = localAiState.isWhistleReady && localAiState.whistleActiveSlug == model.slug
+                                val isBusy = localAiState.whistlePhase == LocalModelPhase.DOWNLOADING
+                                Surface(
+                                    shape = RoundedCornerShape(999.dp),
+                                    color = if (isActive) tokens.acidLime else tokens.cardSurface,
+                                    border = BorderStroke(
+                                        1.dp,
+                                        if (isActive) tokens.acidLime else tokens.hairline
+                                    ),
+                                    modifier = Modifier
+                                        .springClickable(enabled = !isBusy && !isActive) {
+                                            onInstallWhistle(model.slug)
+                                        }
+                                        .testTag("voice_model_chip_${model.slug}")
+                                ) {
+                                    Text(
+                                        text = buildString {
+                                            append(model.slug)
+                                            if (model.sizeMb > 0) append(" · ${model.sizeMb}MB")
+                                            if (isActive) append(" ✓")
+                                        },
+                                        style = MaterialTheme.typography.labelSmall.copy(
+                                            fontWeight = if (isActive) FontWeight.Bold else FontWeight.Medium
+                                        ),
+                                        color = if (isActive) tokens.onAcidLime else tokens.inkMuted,
+                                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp)
                                     )
                                 }
                             }
@@ -685,6 +734,64 @@ fun VoiceCommandSheet(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
+                    // Mic Engine Switcher Pill: Cactus Offline STT vs Live Android SpeechRecognizer
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        val cactusSelected = useCactusMicMode && localAiState.isWhistleReady
+                        Surface(
+                            shape = RoundedCornerShape(999.dp),
+                            color = if (cactusSelected) tokens.acidLime else tokens.onHero.copy(alpha = 0.10f),
+                            border = BorderStroke(
+                                1.dp,
+                                if (cactusSelected) tokens.acidLime else tokens.onHero.copy(alpha = 0.20f)
+                            ),
+                            modifier = Modifier
+                                .springClickable(enabled = !isListeningActive) {
+                                    if (localAiState.isWhistleReady) {
+                                        useCactusMicMode = true
+                                        micNotice = null
+                                    } else {
+                                        onInstallWhistle(null)
+                                    }
+                                }
+                                .testTag("mic_mode_cactus_pill")
+                        ) {
+                            Text(
+                                text = if (localAiState.isWhistleReady) {
+                                    "Cactus ${localAiState.whistleActiveSlug ?: "STT"}"
+                                } else {
+                                    "Download Cactus STT"
+                                },
+                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                color = if (cactusSelected) tokens.onAcidLime else tokens.onHero.copy(alpha = 0.85f),
+                                modifier = Modifier.padding(horizontal = 11.dp, vertical = 5.dp)
+                            )
+                        }
+                        Surface(
+                            shape = RoundedCornerShape(999.dp),
+                            color = if (!cactusSelected) tokens.acidLime else tokens.onHero.copy(alpha = 0.10f),
+                            border = BorderStroke(
+                                1.dp,
+                                if (!cactusSelected) tokens.acidLime else tokens.onHero.copy(alpha = 0.20f)
+                            ),
+                            modifier = Modifier
+                                .springClickable(enabled = !isListeningActive) {
+                                    useCactusMicMode = false
+                                    micNotice = null
+                                }
+                                .testTag("mic_mode_device_pill")
+                        ) {
+                            Text(
+                                text = "Live Device Mic",
+                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                color = if (!cactusSelected) tokens.onAcidLime else tokens.onHero.copy(alpha = 0.85f),
+                                modifier = Modifier.padding(horizontal = 11.dp, vertical = 5.dp)
+                            )
+                        }
+                    }
+
                     // Pulsing AI Voice Orb
                     Box(
                         contentAlignment = Alignment.Center,

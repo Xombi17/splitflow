@@ -15,10 +15,12 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -27,20 +29,27 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.ArrowForward
 import androidx.compose.material.icons.rounded.AccountTree
 import androidx.compose.material.icons.rounded.AutoAwesome
+import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.CloudDone
 import androidx.compose.material.icons.rounded.DocumentScanner
+import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.LocalBar
+import androidx.compose.material.icons.rounded.Memory
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.QrCode2
 import androidx.compose.material.icons.rounded.Shield
 import androidx.compose.material.icons.rounded.VisibilityOff
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -62,14 +71,18 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.ai.LocalAiEngineState
+import com.example.ai.LocalModelPhase
 import com.example.model.DietPreference
 import com.example.ui.components.AudioWaveformVisualizer
 import com.example.ui.components.DietMarkIcon
 import com.example.ui.components.SplitFlowMotion
 import com.example.ui.components.editorialSpecularSheen
 import com.example.ui.components.tactileClickable
+import com.example.ui.motion.SpringButton
 import com.example.ui.motion.SpringPhysics
 import com.example.ui.motion.SpringPreset
 import com.example.ui.motion.springClickable
@@ -104,17 +117,25 @@ private val ONBOARDING_SLIDES = listOf(
         eyebrow = "CLOUD SYNC & PRIVACY",
         title = "Private cloud ledger, offline ready",
         description = "Sign in with Google for isolated Cloud Firestore sync across devices, mask figures with Privacy Blur, or start in Guest Mode and upgrade anytime."
+    ),
+    OnboardingSlideData(
+        eyebrow = "ON-DEVICE AI SETUP",
+        title = "Download local Voice & OCR models",
+        description = "Pre-download Cactus Whistle / Whisper for offline voice commands and Cactus Mirage / Vision for receipt OCR right now — zero cloud rate limits."
     )
 )
 
 /**
- * Parallax-driven 4-slide interactive editorial onboarding walkthrough.
- * Responds dynamically to swipe offset with smooth depth parallax, morphing pill indicators,
- * and tactile spring controls.
+ * Parallax-driven 5-slide interactive editorial onboarding walkthrough with live
+ * on-device Cactus Whistle/Whisper & Mirage OCR model pre-downloading.
  */
 @Composable
 fun OnboardingScreen(
     isReplay: Boolean = false,
+    localAiState: LocalAiEngineState = LocalAiEngineState(),
+    onDownloadVoiceModel: (String?) -> Unit = {},
+    onDownloadVisionModel: (String?) -> Unit = {},
+    onDownloadAllModels: () -> Unit = {},
     onComplete: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -226,7 +247,13 @@ fun OnboardingScreen(
                             0 -> SlidePreviewReceiptVoice()
                             1 -> SlidePreviewTableBar()
                             2 -> SlidePreviewDebtUpi()
-                            else -> SlidePreviewCloudPrivacy()
+                            3 -> SlidePreviewCloudPrivacy()
+                            else -> SlideOnDeviceModelSetup(
+                                localAiState = localAiState,
+                                onDownloadVoice = onDownloadVoiceModel,
+                                onDownloadVision = onDownloadVisionModel,
+                                onDownloadAll = onDownloadAllModels
+                            )
                         }
                     }
 
@@ -922,3 +949,280 @@ private fun SlidePreviewCloudPrivacy() {
         }
     }
 }
+
+@Composable
+private fun SlideOnDeviceModelSetup(
+    localAiState: LocalAiEngineState,
+    onDownloadVoice: (String?) -> Unit,
+    onDownloadVision: (String?) -> Unit,
+    onDownloadAll: () -> Unit
+) {
+    val tokens = SplitFlowThemeTokens.colors
+    val recommendedVoice = localAiState.availableVoiceModels.firstOrNull()
+    val recommendedVision = localAiState.availableVisionModels.firstOrNull()
+
+    OnboardingStageCard {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = 380.dp)
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(34.dp)
+                            .clip(CircleShape)
+                            .background(tokens.acidLime),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Memory,
+                            contentDescription = null,
+                            tint = tokens.onAcidLime,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                    Column {
+                        Text(
+                            text = "Cactus On-Device Models",
+                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                            color = tokens.onHero
+                        )
+                        Text(
+                            text = if (localAiState.areBothModelsReady) {
+                                "Voice & OCR models downloaded & active"
+                            } else {
+                                "100% local — runs offline after setup"
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = tokens.onHero.copy(alpha = 0.68f)
+                        )
+                    }
+                }
+            }
+
+            // 1. Voice Model Row (Whistle / Whisper)
+            OnboardingModelRow(
+                icon = Icons.Rounded.Mic,
+                title = "Voice AI (Whistle / Whisper)",
+                subtitle = when {
+                    localAiState.isWhistleReady ->
+                        "Loaded: ${localAiState.whistleActiveSlug ?: "whistle"}"
+                    localAiState.whistlePhase == LocalModelPhase.DOWNLOADING ->
+                        localAiState.whistleNote
+                    recommendedVoice != null ->
+                        "Model: ${recommendedVoice.slug} (${recommendedVoice.sizeMb} MB)"
+                    else ->
+                        "Cactus Whistle / Whisper speech-to-text"
+                },
+                phase = localAiState.whistlePhase,
+                errorText = localAiState.whistleError,
+                buttonTag = "onboarding_download_voice_button",
+                onDownload = { onDownloadVoice(recommendedVoice?.slug) }
+            )
+
+            // 2. Vision OCR Model Row (Mirage / Cactus VLM)
+            OnboardingModelRow(
+                icon = Icons.Rounded.DocumentScanner,
+                title = "Receipt OCR (Mirage / Vision)",
+                subtitle = when {
+                    localAiState.isMirageReady ->
+                        "Loaded: ${localAiState.mirageActiveSlug ?: "mirage"}"
+                    localAiState.miragePhase == LocalModelPhase.DOWNLOADING ->
+                        localAiState.mirageNote
+                    recommendedVision != null ->
+                        "Model: ${recommendedVision.slug} (${recommendedVision.sizeMb} MB)"
+                    else ->
+                        "Cactus Mirage vision OCR + ML Kit fallback"
+                },
+                phase = localAiState.miragePhase,
+                errorText = localAiState.mirageError,
+                buttonTag = "onboarding_download_vision_button",
+                onDownload = { onDownloadVision(recommendedVision?.slug) }
+            )
+
+            // One-tap Download Both Models CTA
+            if (!localAiState.areBothModelsReady) {
+                SpringButton(
+                    onClick = onDownloadAll,
+                    enabled = !localAiState.isAnyDownloading,
+                    shape = RoundedCornerShape(999.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = tokens.acidLime,
+                        contentColor = tokens.onAcidLime
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(44.dp)
+                        .testTag("onboarding_download_all_models_button")
+                ) {
+                    if (localAiState.isAnyDownloading) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp,
+                            color = tokens.onAcidLime
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = "Downloading on-device models...",
+                            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold)
+                        )
+                    } else {
+                        Icon(Icons.Rounded.Download, contentDescription = null, modifier = Modifier.size(17.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            text = "Download Voice & OCR Models",
+                            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold)
+                        )
+                    }
+                }
+            } else {
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = tokens.positive.copy(alpha = 0.20f),
+                    border = BorderStroke(1.dp, tokens.positive.copy(alpha = 0.50f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.CheckCircle,
+                            contentDescription = null,
+                            tint = tokens.acidLime,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Text(
+                            text = "Both Cactus Voice & OCR models are ready offline!",
+                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                            color = tokens.onHero
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun OnboardingModelRow(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    title: String,
+    subtitle: String,
+    phase: LocalModelPhase,
+    errorText: String?,
+    buttonTag: String,
+    onDownload: () -> Unit
+) {
+    val tokens = SplitFlowThemeTokens.colors
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        color = Color.White.copy(alpha = 0.08f),
+        border = BorderStroke(
+            1.dp,
+            when {
+                errorText != null -> tokens.negative.copy(alpha = 0.55f)
+                phase == LocalModelPhase.READY -> tokens.acidLime.copy(alpha = 0.55f)
+                else -> Color.White.copy(alpha = 0.14f)
+            }
+        ),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = if (phase == LocalModelPhase.READY) tokens.acidLime else tokens.onHero,
+                    modifier = Modifier.size(20.dp)
+                )
+                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(
+                        text = title,
+                        style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                        color = tokens.onHero,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = subtitle,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = tokens.onHero.copy(alpha = 0.72f),
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                when (phase) {
+                    LocalModelPhase.READY -> {
+                        Surface(
+                            shape = RoundedCornerShape(999.dp),
+                            color = tokens.acidLime
+                        ) {
+                            Text(
+                                text = "READY",
+                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                color = tokens.onAcidLime,
+                                modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp)
+                            )
+                        }
+                    }
+                    LocalModelPhase.DOWNLOADING -> {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(20.dp),
+                            strokeWidth = 2.dp,
+                            color = tokens.acidLime
+                        )
+                    }
+                    LocalModelPhase.NOT_DOWNLOADED, LocalModelPhase.UNAVAILABLE -> {
+                        SpringButton(
+                            onClick = onDownload,
+                            shape = RoundedCornerShape(999.dp),
+                            contentPadding = PaddingValues(horizontal = 11.dp, vertical = 5.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color.White.copy(alpha = 0.16f),
+                                contentColor = tokens.onHero
+                            ),
+                            modifier = Modifier
+                                .heightIn(min = 34.dp)
+                                .testTag(buttonTag)
+                        ) {
+                            Text(
+                                text = if (phase == LocalModelPhase.UNAVAILABLE) "Retry" else "Get",
+                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold)
+                            )
+                        }
+                    }
+                }
+            }
+            if (!errorText.isNullOrBlank()) {
+                Text(
+                    text = errorText,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color(0xFFFFB4AB),
+                    maxLines = 3,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+    }
+}
+

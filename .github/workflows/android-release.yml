@@ -46,10 +46,29 @@ jobs:
       - name: Decode release keystore
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           if [ -n "$KEYSTORE_BASE64" ]; then
             printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/splitflow-upload.jks"
             echo "KEYSTORE_PATH=$RUNNER_TEMP/splitflow-upload.jks" >> "$GITHUB_ENV"
+            echo "STORE_PASSWORD=$STORE_PASSWORD" >> "$GITHUB_ENV"
+            echo "KEY_PASSWORD=$KEY_PASSWORD" >> "$GITHUB_ENV"
+          else
+            CI_KEYSTORE="$RUNNER_TEMP/splitflow-upload.jks"
+            CI_PASSWORD="splitflow-ci-release"
+            keytool -genkeypair -v \
+              -keystore "$CI_KEYSTORE" \
+              -storepass "$CI_PASSWORD" \
+              -keypass "$CI_PASSWORD" \
+              -alias upload \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=SplitFlow,OU=CI,O=SplitFlow,L=Unknown,ST=Unknown,C=US" >/dev/null 2>&1
+            echo "KEYSTORE_PATH=$CI_KEYSTORE" >> "$GITHUB_ENV"
+            echo "STORE_PASSWORD=$CI_PASSWORD" >> "$GITHUB_ENV"
+            echo "KEY_PASSWORD=$CI_PASSWORD" >> "$GITHUB_ENV"
           fi
 
       - name: Decode Firebase configuration
@@ -61,9 +80,6 @@ jobs:
           fi
 
       - name: Build release APK
-        env:
-          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: ./gradlew --no-daemon clean :app:assembleRelease
 
       - name: Name APK and generate checksum

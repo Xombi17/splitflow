@@ -1,0 +1,308 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global safety net: default-deny everything
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- GLOBAL HARDENED HELPERS ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidCurrency(val) {
+      return val is string && val in ['INR', 'USD', 'EUR', 'GBP', 'THB'];
+    }
+
+    function isValidGroupCategory(val) {
+      return val is string && val in ['TRIP', 'HOME', 'EVENT', 'COUPLE', 'PERSONAL'];
+    }
+
+    function isValidExpenseCategory(val) {
+      return val is string && val in ['FOOD', 'TRAVEL', 'STAY', 'GROCERIES', 'UTILITIES', 'ENTERTAINMENT', 'SHOPPING', 'OTHER'];
+    }
+
+    function isValidSplitType(val) {
+      return val is string && val in ['EQUAL', 'EXACT', 'PERCENTAGE', 'SHARES', 'ITEMIZED'];
+    }
+
+    function isValidPaymentMethod(val) {
+      return val is string && val in ['UPI', 'BANK', 'CASH', 'CARD'];
+    }
+
+    function isValidHexColor(val) {
+      return val is string && val.size() >= 7 && val.size() <= 9 && val.matches('^#[0-9A-Fa-f]{6,8}$');
+    }
+
+    function isValidRecurringFrequency(val) {
+      return val is string && val in ['NONE', 'WEEKLY', 'MONTHLY', 'QUARTERLY'];
+    }
+
+    function isValidDietPreference(val) {
+      return val is string && val in ['VEG', 'NON_VEG', 'EGGETARIAN', 'VEGAN'];
+    }
+
+    // --- ENTITY VALIDATION BLUEPRINTS ---
+
+    function isValidUserProfile(data, userId) {
+      return data.userId == userId &&
+             data.userId == request.auth.uid &&
+             data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80 &&
+             (!('email' in data) || (data.email is string && data.email.size() <= 120)) &&
+             (!('upiVpa' in data) || (data.upiVpa is string && data.upiVpa.size() <= 80)) &&
+             isValidCurrency(data.defaultCurrency) &&
+             data.darkMode is bool &&
+             data.seededDemo is bool &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidLedgerMember(data, userId) {
+      return data.userId == userId &&
+             data.userId == request.auth.uid &&
+             data.name is string && data.name.size() >= 1 && data.name.size() <= 80 &&
+             (!('email' in data) || (data.email is string && data.email.size() <= 120)) &&
+             (!('upiVpa' in data) || (data.upiVpa is string && data.upiVpa.size() <= 80)) &&
+             isValidHexColor(data.avatarColorHex) &&
+             data.selfProfile is bool &&
+             data.guestProfile is bool &&
+             (!('claimedAtLabel' in data) || (data.claimedAtLabel is string && data.claimedAtLabel.size() <= 60)) &&
+             (!('dietPreference' in data) || isValidDietPreference(data.dietPreference)) &&
+             (!('drinksAlcohol' in data) || data.drinksAlcohol is bool) &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidExpenseGroup(data, userId) {
+      return data.userId == userId &&
+             data.userId == request.auth.uid &&
+             data.name is string && data.name.size() >= 1 && data.name.size() <= 80 &&
+             isValidGroupCategory(data.category) &&
+             isValidCurrency(data.currency) &&
+             data.memberIds is list && data.memberIds.size() >= 1 && data.memberIds.size() <= 50 &&
+             (data.memberIds[0] is string && data.memberIds[0].size() <= 128) &&
+             isValidHexColor(data.accentColorHex) &&
+             data.archived is bool &&
+             (!('budgetMinorUnits' in data) || (data.budgetMinorUnits is int && data.budgetMinorUnits >= 0 && data.budgetMinorUnits <= 10000000000)) &&
+             (!('splitMemoryNotes' in data) || (data.splitMemoryNotes is string && data.splitMemoryNotes.size() <= 400)) &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidExpenseRecord(data, userId) {
+      return data.userId == userId &&
+             data.userId == request.auth.uid &&
+             (!('groupId' in data) || (data.groupId is string && data.groupId.size() <= 128)) &&
+             data.title is string && data.title.size() >= 1 && data.title.size() <= 120 &&
+             (!('notes' in data) || (data.notes is string && data.notes.size() <= 500)) &&
+             isValidExpenseCategory(data.category) &&
+             isValidCurrency(data.currency) &&
+             data.totalMinorUnits is int && data.totalMinorUnits > 0 && data.totalMinorUnits <= 10000000000 &&
+             isValidSplitType(data.splitType) &&
+             data.dateLabel is string && data.dateLabel.size() >= 1 && data.dateLabel.size() <= 40 &&
+             data.shareCode is string && data.shareCode.size() >= 4 && data.shareCode.size() <= 64 &&
+             data.aiExtracted is bool &&
+             (!('aiConfidenceNote' in data) || (data.aiConfidenceNote is string && data.aiConfidenceNote.size() <= 300)) &&
+             data.settled is bool &&
+             data.payers is list && data.payers.size() >= 1 && data.payers.size() <= 30 &&
+             (data.payers[0] is map) &&
+             data.allocations is list && data.allocations.size() >= 1 && data.allocations.size() <= 50 &&
+             (data.allocations[0] is map) &&
+             data.lineItems is list && data.lineItems.size() <= 100 &&
+             (data.lineItems.size() == 0 || data.lineItems[0] is map) &&
+             data.taxMinorUnits is int && data.taxMinorUnits >= 0 && data.taxMinorUnits <= 1000000000 &&
+             data.serviceChargeMinorUnits is int && data.serviceChargeMinorUnits >= 0 && data.serviceChargeMinorUnits <= 1000000000 &&
+             data.discountMinorUnits is int && data.discountMinorUnits >= 0 && data.discountMinorUnits <= 1000000000 &&
+             (!('recurringFrequency' in data) || isValidRecurringFrequency(data.recurringFrequency)) &&
+             (!('nextDueDateLabel' in data) || (data.nextDueDateLabel is string && data.nextDueDateLabel.size() <= 40)) &&
+             (!('receiptPhotoPath' in data) || (data.receiptPhotoPath is string && data.receiptPhotoPath.size() <= 300)) &&
+             (!('fxRateToBaseMicros' in data) || (data.fxRateToBaseMicros is int && data.fxRateToBaseMicros >= 1 && data.fxRateToBaseMicros <= 10000000000)) &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidSettlementRecord(data, userId) {
+      return data.userId == userId &&
+             data.userId == request.auth.uid &&
+             (!('groupId' in data) || (data.groupId is string && data.groupId.size() <= 128)) &&
+             data.fromMemberId is string && data.fromMemberId.size() >= 1 && data.fromMemberId.size() <= 128 &&
+             data.toMemberId is string && data.toMemberId.size() >= 1 && data.toMemberId.size() <= 128 &&
+             data.fromMemberId != data.toMemberId &&
+             data.amountMinorUnits is int && data.amountMinorUnits > 0 && data.amountMinorUnits <= 10000000000 &&
+             isValidCurrency(data.currency) &&
+             isValidPaymentMethod(data.paymentMethod) &&
+             (!('note' in data) || (data.note is string && data.note.size() <= 200)) &&
+             (!('paymentProofPath' in data) || (data.paymentProofPath is string && data.paymentProofPath.size() <= 300)) &&
+             data.dateLabel is string && data.dateLabel.size() >= 1 && data.dateLabel.size() <= 40 &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    // --- COLLECTION RULES ---
+
+    match /users/{userId} {
+      allow get: if isOwner(userId) && isValidId(userId);
+      allow list: if false;
+
+      allow create: if isOwner(userId) &&
+                       isValidId(userId) &&
+                       incoming().keys().hasAll(['userId', 'displayName', 'defaultCurrency', 'darkMode', 'seededDemo', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'displayName', 'email', 'upiVpa', 'defaultCurrency', 'darkMode', 'seededDemo', 'createdAt', 'updatedAt']) &&
+                       isValidUserProfile(incoming(), userId);
+
+      allow update: if isOwner(userId) &&
+                       isValidId(userId) &&
+                       isValidUserProfile(incoming(), userId) &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       (
+                         // Action: Update profile & preferences
+                         incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'email', 'upiVpa', 'defaultCurrency', 'darkMode', 'seededDemo', 'updatedAt'])
+                       );
+
+      allow delete: if isOwner(userId) && isValidId(userId);
+
+      // Members subcollection (self, friends, claimable shadow Guests)
+      match /members/{memberId} {
+        allow get: if isOwner(userId) && isValidId(memberId);
+        allow list: if isOwner(userId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(memberId) &&
+                         incoming().keys().hasAll(['userId', 'name', 'avatarColorHex', 'selfProfile', 'guestProfile', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['userId', 'name', 'email', 'upiVpa', 'avatarColorHex', 'selfProfile', 'guestProfile', 'claimedAtLabel', 'dietPreference', 'drinksAlcohol', 'createdAt', 'updatedAt']) &&
+                         isValidLedgerMember(incoming(), userId);
+
+        allow update: if isOwner(userId) &&
+                         isValidId(memberId) &&
+                         isValidLedgerMember(incoming(), userId) &&
+                         incoming().userId == existing().userId &&
+                         incoming().createdAt == existing().createdAt &&
+                         (
+                           // Action: Edit member contact info or dietary/drink preferences
+                           incoming().diff(existing()).affectedKeys().hasOnly(['name', 'email', 'upiVpa', 'avatarColorHex', 'dietPreference', 'drinksAlcohol', 'updatedAt']) ||
+                           // Action: Claim shadow guest profile into verified member
+                           (existing().guestProfile == true && incoming().guestProfile == false &&
+                            incoming().diff(existing()).affectedKeys().hasOnly(['name', 'email', 'upiVpa', 'guestProfile', 'claimedAtLabel', 'dietPreference', 'drinksAlcohol', 'updatedAt']))
+                         );
+
+        allow delete: if isOwner(userId) && isValidId(memberId);
+      }
+
+      // Expense groups subcollection
+      match /groups/{groupId} {
+        allow get: if isOwner(userId) && isValidId(groupId);
+        allow list: if isOwner(userId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(groupId) &&
+                         incoming().keys().hasAll(['userId', 'name', 'category', 'currency', 'memberIds', 'accentColorHex', 'archived', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['userId', 'name', 'category', 'currency', 'memberIds', 'accentColorHex', 'archived', 'budgetMinorUnits', 'splitMemoryNotes', 'createdAt', 'updatedAt']) &&
+                         isValidExpenseGroup(incoming(), userId);
+
+        allow update: if isOwner(userId) &&
+                         isValidId(groupId) &&
+                         isValidExpenseGroup(incoming(), userId) &&
+                         incoming().userId == existing().userId &&
+                         incoming().createdAt == existing().createdAt &&
+                         (
+                           // Action: Update group settings, budget cap, split memory notes, or members
+                           incoming().diff(existing()).affectedKeys().hasOnly(['name', 'category', 'currency', 'memberIds', 'accentColorHex', 'archived', 'budgetMinorUnits', 'splitMemoryNotes', 'updatedAt'])
+                         );
+
+        allow delete: if isOwner(userId) && isValidId(groupId);
+      }
+
+      // Expenses subcollection (group and 1-on-1 personal splits)
+      match /expenses/{expenseId} {
+        allow get: if isOwner(userId) && isValidId(expenseId);
+        allow list: if isOwner(userId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(expenseId) &&
+                         incoming().keys().hasAll([
+                           'userId', 'title', 'category', 'currency', 'totalMinorUnits',
+                           'splitType', 'dateLabel', 'shareCode', 'aiExtracted', 'settled',
+                           'payers', 'allocations', 'lineItems', 'taxMinorUnits',
+                           'serviceChargeMinorUnits', 'discountMinorUnits', 'createdAt', 'updatedAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'userId', 'groupId', 'title', 'notes', 'category', 'currency', 'totalMinorUnits',
+                           'splitType', 'dateLabel', 'shareCode', 'aiExtracted', 'aiConfidenceNote', 'settled',
+                           'payers', 'allocations', 'lineItems', 'taxMinorUnits',
+                           'serviceChargeMinorUnits', 'discountMinorUnits',
+                           'recurringFrequency', 'nextDueDateLabel', 'receiptPhotoPath', 'fxRateToBaseMicros',
+                           'createdAt', 'updatedAt'
+                         ]) &&
+                         isValidExpenseRecord(incoming(), userId);
+
+        allow update: if isOwner(userId) &&
+                         isValidId(expenseId) &&
+                         isValidExpenseRecord(incoming(), userId) &&
+                         incoming().userId == existing().userId &&
+                         incoming().createdAt == existing().createdAt &&
+                         (
+                           // Action: Edit split / claim line items / toggle settled / recurring / receipt / FX
+                           incoming().diff(existing()).affectedKeys().hasOnly([
+                             'groupId', 'title', 'notes', 'category', 'currency', 'totalMinorUnits',
+                             'splitType', 'dateLabel', 'settled', 'payers', 'allocations',
+                             'lineItems', 'taxMinorUnits', 'serviceChargeMinorUnits', 'discountMinorUnits',
+                             'recurringFrequency', 'nextDueDateLabel', 'receiptPhotoPath', 'fxRateToBaseMicros',
+                             'updatedAt'
+                           ])
+                         );
+
+        allow delete: if isOwner(userId) && isValidId(expenseId);
+      }
+
+      // Settlements subcollection
+      match /settlements/{settlementId} {
+        allow get: if isOwner(userId) && isValidId(settlementId);
+        allow list: if isOwner(userId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(settlementId) &&
+                         incoming().keys().hasAll([
+                           'userId', 'fromMemberId', 'toMemberId', 'amountMinorUnits',
+                           'currency', 'paymentMethod', 'dateLabel', 'createdAt', 'updatedAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'userId', 'groupId', 'fromMemberId', 'toMemberId', 'amountMinorUnits',
+                           'currency', 'paymentMethod', 'note', 'paymentProofPath', 'dateLabel', 'createdAt', 'updatedAt'
+                         ]) &&
+                         isValidSettlementRecord(incoming(), userId);
+
+        allow update: if isOwner(userId) &&
+                         isValidId(settlementId) &&
+                         isValidSettlementRecord(incoming(), userId) &&
+                         incoming().userId == existing().userId &&
+                         incoming().createdAt == existing().createdAt &&
+                         (
+                           // Action: Edit settlement note, payment method, or proof attachment
+                           incoming().diff(existing()).affectedKeys().hasOnly(['note', 'paymentMethod', 'paymentProofPath', 'updatedAt'])
+                         );
+
+        allow delete: if isOwner(userId) && isValidId(settlementId);
+      }
+    }
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "name": "SplitFlow",
+  "description": "AI-native social expense splitter and ledger with multimodal receipt lens, voice splitting, and graph-based debt simplification.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

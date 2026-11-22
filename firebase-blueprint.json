@@ -1,0 +1,135 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Signed-in SplitFlow user profile, payment VPA, currency preference, and theme state.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Firebase Auth UID of the owner." },
+        "displayName": { "type": "string", "description": "Display name shown across groups and splits." },
+        "email": { "type": "string", "description": "Optional verified email address." },
+        "upiVpa": { "type": "string", "description": "Optional UPI Virtual Payment Address for settlement deep links." },
+        "defaultCurrency": { "type": "string", "enum": ["INR", "USD", "EUR", "GBP", "THB"] },
+        "darkMode": { "type": "boolean", "description": "Whether dark editorial mode is enabled." },
+        "seededDemo": { "type": "boolean", "description": "Whether initial demo ledger data has been seeded." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp set via FieldValue.serverTimestamp()." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp set via FieldValue.serverTimestamp()." }
+      },
+      "required": ["userId", "displayName", "defaultCurrency", "darkMode", "seededDemo", "createdAt", "updatedAt"]
+    },
+    "LedgerMember": {
+      "title": "LedgerMember",
+      "description": "A person in the user's ledger (self, verified friend, or claimable shadow Guest profile).",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Owner Firebase Auth UID." },
+        "name": { "type": "string", "description": "Member display name." },
+        "email": { "type": "string", "description": "Optional email when claimed or verified." },
+        "upiVpa": { "type": "string", "description": "Optional UPI VPA for instant settlement." },
+        "avatarColorHex": { "type": "string", "description": "Hex color token for avatar badge." },
+        "selfProfile": { "type": "boolean", "description": "True for the signed-in user's own member entry." },
+        "guestProfile": { "type": "boolean", "description": "True for unverified shadow guest profiles." },
+        "claimedAtLabel": { "type": "string", "description": "Optional date label when a guest profile was claimed." },
+        "dietPreference": { "type": "string", "enum": ["VEG", "NON_VEG", "EGGETARIAN", "VEGAN"], "description": "Optional dietary preference for Veg/Non-Veg dining splits." },
+        "drinksAlcohol": { "type": "boolean", "description": "Optional preference indicating whether the member participates in alcohol/bar splits." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp via FieldValue.serverTimestamp()." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp via FieldValue.serverTimestamp()." }
+      },
+      "required": ["userId", "name", "avatarColorHex", "selfProfile", "guestProfile", "createdAt", "updatedAt"]
+    },
+    "ExpenseGroup": {
+      "title": "ExpenseGroup",
+      "description": "A collaborative expense group (Trip, Home, Event, Couple, Personal) with bounded members.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Owner Firebase Auth UID." },
+        "name": { "type": "string", "description": "Group name." },
+        "category": { "type": "string", "enum": ["TRIP", "HOME", "EVENT", "COUPLE", "PERSONAL"] },
+        "currency": { "type": "string", "enum": ["INR", "USD", "EUR", "GBP", "THB"] },
+        "memberIds": { "type": "array", "description": "Bounded list of LedgerMember IDs participating in this group." },
+        "accentColorHex": { "type": "string", "description": "Hex color accent for group card." },
+        "archived": { "type": "boolean", "description": "Whether the group is archived." },
+        "budgetMinorUnits": { "type": "integer", "description": "Optional group spend budget cap in minor units." },
+        "splitMemoryNotes": { "type": "string", "description": "Optional group split memory rules (e.g. dietary or custom room ratio defaults)." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp via FieldValue.serverTimestamp()." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp via FieldValue.serverTimestamp()." }
+      },
+      "required": ["userId", "name", "category", "currency", "memberIds", "accentColorHex", "archived", "createdAt", "updatedAt"]
+    },
+    "ExpenseRecord": {
+      "title": "ExpenseRecord",
+      "description": "An expense stored strictly in integer minor units with multi-payer support, split allocations, and optional itemized receipt lines.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Owner Firebase Auth UID." },
+        "groupId": { "type": "string", "description": "Optional ExpenseGroup ID (omitted for 1-on-1 personal splits)." },
+        "title": { "type": "string", "description": "Merchant or expense title." },
+        "notes": { "type": "string", "description": "Optional notes." },
+        "category": { "type": "string", "enum": ["FOOD", "TRAVEL", "STAY", "GROCERIES", "UTILITIES", "ENTERTAINMENT", "SHOPPING", "OTHER"] },
+        "currency": { "type": "string", "enum": ["INR", "USD", "EUR", "GBP", "THB"] },
+        "totalMinorUnits": { "type": "integer", "description": "Total expense in integer minor units (paise/cents)." },
+        "splitType": { "type": "string", "enum": ["EQUAL", "EXACT", "PERCENTAGE", "SHARES", "ITEMIZED"] },
+        "dateLabel": { "type": "string", "description": "ISO date label YYYY-MM-DD." },
+        "shareCode": { "type": "string", "description": "Shareable split code for public preview link." },
+        "aiExtracted": { "type": "boolean", "description": "True when parsed via AI Expense Lens or Voice Splitter." },
+        "aiConfidenceNote": { "type": "string", "description": "Optional AI extraction summary note." },
+        "settled": { "type": "boolean", "description": "Whether explicitly marked settled." },
+        "payers": { "type": "array", "description": "List of payer maps {memberId, amountMinorUnits}." },
+        "allocations": { "type": "array", "description": "List of allocation maps {memberId, amountMinorUnits, percentageBps, shares}." },
+        "lineItems": { "type": "array", "description": "List of itemized line maps {itemId, name, quantity, unitPriceMinor, totalPriceMinor, assignedMemberIds}." },
+        "taxMinorUnits": { "type": "integer", "description": "Receipt tax in minor units." },
+        "serviceChargeMinorUnits": { "type": "integer", "description": "Receipt service charge or tip in minor units." },
+        "discountMinorUnits": { "type": "integer", "description": "Receipt discount in minor units." },
+        "recurringFrequency": { "type": "string", "enum": ["NONE", "WEEKLY", "MONTHLY", "QUARTERLY"], "description": "Optional recurring cadence." },
+        "nextDueDateLabel": { "type": "string", "description": "Optional ISO date label YYYY-MM-DD for next recurring due date." },
+        "receiptPhotoPath": { "type": "string", "description": "Optional app-private local path to attached receipt photo." },
+        "fxRateToBaseMicros": { "type": "integer", "description": "Optional deterministic FX rate scaled by 1,000,000 for multi-currency conversion." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp via FieldValue.serverTimestamp()." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp via FieldValue.serverTimestamp()." }
+      },
+      "required": ["userId", "title", "category", "currency", "totalMinorUnits", "splitType", "dateLabel", "shareCode", "aiExtracted", "settled", "payers", "allocations", "lineItems", "taxMinorUnits", "serviceChargeMinorUnits", "discountMinorUnits", "createdAt", "updatedAt"]
+    },
+    "SettlementRecord": {
+      "title": "SettlementRecord",
+      "description": "A recorded debt settlement transfer between two members in integer minor units.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Owner Firebase Auth UID." },
+        "groupId": { "type": "string", "description": "Optional group ID associated with the settlement." },
+        "fromMemberId": { "type": "string", "description": "Debtor LedgerMember ID." },
+        "toMemberId": { "type": "string", "description": "Creditor LedgerMember ID." },
+        "amountMinorUnits": { "type": "integer", "description": "Settlement amount in integer minor units." },
+        "currency": { "type": "string", "enum": ["INR", "USD", "EUR", "GBP", "THB"] },
+        "paymentMethod": { "type": "string", "enum": ["UPI", "BANK", "CASH", "CARD"] },
+        "note": { "type": "string", "description": "Optional settlement note or UPI ref." },
+        "paymentProofPath": { "type": "string", "description": "Optional app-private local path to attached UPI/bank settlement proof screenshot." },
+        "dateLabel": { "type": "string", "description": "ISO date label YYYY-MM-DD." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp via FieldValue.serverTimestamp()." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp via FieldValue.serverTimestamp()." }
+      },
+      "required": ["userId", "fromMemberId", "toMemberId", "amountMinorUnits", "currency", "paymentMethod", "dateLabel", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Owner profile settings, UPI VPA, and currency preferences."
+    },
+    "/users/{userId}/members/{memberId}": {
+      "schema": { "$ref": "#/entities/LedgerMember" },
+      "description": "User's contacts, self profile, and shadow Guest profiles."
+    },
+    "/users/{userId}/groups/{groupId}": {
+      "schema": { "$ref": "#/entities/ExpenseGroup" },
+      "description": "User's expense groups."
+    },
+    "/users/{userId}/expenses/{expenseId}": {
+      "schema": { "$ref": "#/entities/ExpenseRecord" },
+      "description": "User's group and 1-on-1 personal expenses with itemized splits."
+    },
+    "/users/{userId}/settlements/{settlementId}": {
+      "schema": { "$ref": "#/entities/SettlementRecord" },
+      "description": "Recorded debt settlements and UPI transfers."
+    }
+  }
+}

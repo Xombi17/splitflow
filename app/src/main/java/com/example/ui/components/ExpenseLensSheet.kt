@@ -329,9 +329,9 @@ fun ExpenseLensSheet(
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
                                     text = if (localAiState.isMirageReady) {
-                                        "Cactus ${localAiState.mirageActiveSlug ?: "Mirage"} OCR · Ready"
+                                        "Cactus Mirage OCR · Ready"
                                     } else {
-                                        "On-Device Receipt OCR"
+                                        "Cactus Mirage Receipt OCR"
                                     },
                                     style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
                                     color = MaterialTheme.colorScheme.onSurface
@@ -349,7 +349,7 @@ fun ExpenseLensSheet(
                                         color = tokens.positiveContainer
                                     ) {
                                         Text(
-                                            text = "CACTUS",
+                                            text = "MIRAGE",
                                             style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
                                             color = tokens.positive,
                                             modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp)
@@ -379,48 +379,8 @@ fun ExpenseLensSheet(
                                         Icon(Icons.Rounded.Download, contentDescription = null, modifier = Modifier.size(14.dp))
                                         Spacer(Modifier.width(4.dp))
                                         Text(
-                                            text = if (localAiState.miragePhase == LocalModelPhase.UNAVAILABLE) "Retry" else "Mirage",
+                                            text = if (localAiState.miragePhase == LocalModelPhase.UNAVAILABLE) "Retry" else "Get Mirage",
                                             style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold)
-                                        )
-                                    }
-                                }
-                            }
-                        }
-
-                        // Selectable Cactus Mirage / Vision OCR Model Chips
-                        if (localAiState.availableVisionModels.isNotEmpty()) {
-                            FlowRow(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                verticalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                localAiState.availableVisionModels.take(4).forEach { model ->
-                                    val isActive = localAiState.isMirageReady && localAiState.mirageActiveSlug == model.slug
-                                    val isBusy = localAiState.miragePhase == LocalModelPhase.DOWNLOADING
-                                    Surface(
-                                        shape = RoundedCornerShape(999.dp),
-                                        color = if (isActive) tokens.acidLime else tokens.cardSurface,
-                                        border = BorderStroke(
-                                            1.dp,
-                                            if (isActive) tokens.acidLime else tokens.hairline
-                                        ),
-                                        modifier = Modifier
-                                            .clickable(enabled = !isBusy && !isActive) {
-                                                onInstallMirage(model.slug)
-                                            }
-                                            .testTag("vision_model_chip_${model.slug}")
-                                    ) {
-                                        Text(
-                                            text = buildString {
-                                                append(model.slug)
-                                                if (model.sizeMb > 0) append(" · ${model.sizeMb}MB")
-                                                if (isActive) append(" ✓")
-                                            },
-                                            style = MaterialTheme.typography.labelSmall.copy(
-                                                fontWeight = if (isActive) FontWeight.Bold else FontWeight.Medium
-                                            ),
-                                            color = if (isActive) tokens.onAcidLime else tokens.inkMuted,
-                                            modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp)
                                         )
                                     }
                                 }

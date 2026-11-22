@@ -1,8 +1,8 @@
 package com.example.ui.components
 
 import android.Manifest
+import android.app.Activity
 import android.content.pm.PackageManager
-import android.speech.tts.TextToSpeech
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
@@ -106,7 +106,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import com.example.ai.ActiveEngineKind
 import com.example.ai.LocalAiEngineState
 import com.example.ai.LocalModelPhase
+import com.example.ai.LocalVoiceParser
 import com.example.ai.VoiceAudioRecorder
+import com.example.ai.VoiceTtsManager
 import com.example.engine.FinanceEngine
 import com.example.model.AsyncUiState
 import com.example.model.VoiceActionType
@@ -160,44 +162,31 @@ fun VoiceCommandSheet(
     val isListeningActive = isWavRecording || isLiveSpeechListening
     val activeAmplitude = if (isWavRecording) wavAmplitude else liveSpeechAmplitude
 
-    // Default to explicit initialGroupId or Personal (null) so "Tanmay owes me 500" stays 1-on-1 Personal
+    // Default to Live Smart Speech (real-time N-best Android SpeechRecognizer) for highest name & number accuracy,
+    // while keeping Cactus Offline STT (Whistle / Whisper) selectable in 1 tap or as automatic offline fallback.
     var selectedGroupId by remember(initialGroupId) { mutableStateOf(initialGroupId) }
     var autoApplyToLedger by remember { mutableStateOf(true) }
     var speakRepliesAloud by remember { mutableStateOf(true) }
-    var useCactusMicMode by remember { mutableStateOf(localAiState.isWhistleReady) }
+    var useCactusMicMode by remember { mutableStateOf(false) }
+    var livePartialTranscript by remember { mutableStateOf("") }
     var typedCommand by remember { mutableStateOf("") }
     var micNotice by remember { mutableStateOf<String?>(null) }
     var editableTitle by remember { mutableStateOf("") }
     var showEditDetails by remember { mutableStateOf(false) }
 
-    LaunchedEffect(localAiState.isWhistleReady) {
-        if (localAiState.isWhistleReady) {
-            useCactusMicMode = true
-        }
-    }
-
-    // On-device TextToSpeech for spoken confirmations
-    var ttsEngine by remember { mutableStateOf<TextToSpeech?>(null) }
-    var ttsReady by remember { mutableStateOf(false) }
-    DisposableEffect(context) {
-        var instance: TextToSpeech? = null
-        instance = TextToSpeech(context.applicationContext) { status ->
-            if (status == TextToSpeech.SUCCESS) {
-                instance?.language = Locale.getDefault()
-                ttsReady = true
-            }
-        }
-        ttsEngine = instance
+    // Reliable Android Text-to-Speech controller (configured with TTS_SERVICE manifest query & AudioAttributes)
+    val ttsManager = remember(context) { VoiceTtsManager(context) }
+    val ttsState by ttsManager.state.collectAsStateWithLifecycle()
+    DisposableEffect(ttsManager) {
         onDispose {
             audioRecorder.release()
             runCatching { speechRecognizer?.destroy() }
             speechRecognizer = null
-            instance.stop()
-            instance.shutdown()
+            ttsManager.release()
         }
     }
 
-    // Sync editable fields, scroll result into view & speak reply when a new result arrives
+    // Sync editable fields & speak confirmation reply whenever a new voice result succeeds
     LaunchedEffect(voiceState) {
         if (voiceState is AsyncUiState.Success) {
             val res = voiceState.data
@@ -206,13 +195,8 @@ fun VoiceCommandSheet(
             }
             editableTitle = res.parsed.title
             showEditDetails = false
-            if (speakRepliesAloud && ttsReady && res.parsed.assistantReply.isNotBlank()) {
-                ttsEngine?.speak(
-                    res.parsed.assistantReply,
-                    TextToSpeech.QUEUE_FLUSH,
-                    null,
-                    "splitflow_ai_reply"
-                )
+            if (speakRepliesAloud && res.parsed.assistantReply.isNotBlank()) {
+                ttsManager.speak(res.parsed.assistantReply)
             }
         }
     }
@@ -224,7 +208,7 @@ fun VoiceCommandSheet(
             micNotice = "Type a command like \"Tanmay owes me 500 rupees\" first."
         } else {
             micNotice = null
-            ttsEngine?.stop()
+            ttsManager.stop()
             if (isWavRecording) audioRecorder.cancelRecording()
             if (isLiveSpeechListening) {
                 runCatching { speechRecognizer?.stopListening() }
@@ -243,13 +227,81 @@ fun VoiceCommandSheet(
         liveSpeechAmplitude = 0f
     }
 
-    val startDeviceSpeechFallback: () -> Unit = {
-        if (!SpeechRecognizer.isRecognitionAvailable(context)) {
-            micNotice = "Install Cactus Whistle (~17 MB) above for offline voice, or type your command below."
+    val buildSpeechIntent: () -> Intent = {
+        val bcp47Lang = Locale.getDefault().toLanguageTag().ifBlank { "en-IN" }
+        Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, bcp47Lang)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, bcp47Lang)
+            putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, context.packageName)
+            putExtra(RecognizerIntent.EXTRA_PROMPT, "Say e.g. \"Tanmay owes me 500 rupees\"")
+        }
+    }
+
+    // Native Android Voice Input dialog fallback — works reliably on ColorOS, OxygenOS, MIUI, Samsung, and Pixel
+    val systemVoiceLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { activityResult ->
+        isLiveSpeechListening = false
+        liveSpeechAmplitude = 0f
+        if (activityResult.resultCode == Activity.RESULT_OK) {
+            val candidates = activityResult.data
+                ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+                .orEmpty()
+            val bestHeard = LocalVoiceParser.pickBestTranscript(candidates, snapshot.members)
+            if (bestHeard.isNotBlank()) {
+                micNotice = null
+                typedCommand = bestHeard
+                onParseCommand(bestHeard, selectedGroupId, autoApplyToLedger, true)
+            } else {
+                micNotice = "Didn't catch any words — tap the mic and try again."
+            }
+        }
+    }
+
+    val launchSystemVoiceDialog: () -> Boolean = {
+        val intent = buildSpeechIntent()
+        val canResolve = intent.resolveActivity(context.packageManager) != null
+        if (canResolve) {
+            runCatching {
+                systemVoiceLauncher.launch(intent)
+                true
+            }.getOrDefault(false)
         } else {
+            false
+        }
+    }
+
+    val startCactusOfflineRecorder: () -> Unit = {
+        audioRecorder.startRecording(
+            enableVadAutoStop = true,
+            onAutoStop = { wavBytes ->
+                onProcessAudio(wavBytes, selectedGroupId, autoApplyToLedger)
+            },
+            onError = { err ->
+                micNotice = err
+            }
+        )
+    }
+
+    val startDeviceSpeechRecognizer: () -> Unit = {
+        if (!SpeechRecognizer.isRecognitionAvailable(context)) {
+            if (!launchSystemVoiceDialog()) {
+                if (localAiState.isWhistleReady) {
+                    useCactusMicMode = true
+                    startCactusOfflineRecorder()
+                } else {
+                    micNotice = "No speech service found on device. Tap Get Whistle above or type below."
+                }
+            }
+        } else {
+            // Reuse a single SpeechRecognizer cleanly without racing destroy() right before startListening()
             val recognizer = speechRecognizer ?: SpeechRecognizer.createSpeechRecognizer(context).also {
                 speechRecognizer = it
             }
+            livePartialTranscript = ""
             recognizer.setRecognitionListener(object : RecognitionListener {
                 override fun onReadyForSpeech(params: Bundle?) {
                     isLiveSpeechListening = true
@@ -268,19 +320,52 @@ fun VoiceCommandSheet(
                 override fun onError(error: Int) {
                     isLiveSpeechListening = false
                     liveSpeechAmplitude = 0f
-                    micNotice = if (error == SpeechRecognizer.ERROR_NO_MATCH || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) {
-                        "Didn't catch that clearly — tap the mic again or type below."
-                    } else {
-                        "Device speech listener unavailable (code $error). Install Cactus Whistle above or type below."
+                    val isOfflineNetErr = error == SpeechRecognizer.ERROR_NETWORK ||
+                        error == SpeechRecognizer.ERROR_NETWORK_TIMEOUT
+                    val isRomServiceError = error == SpeechRecognizer.ERROR_CLIENT ||
+                        error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY ||
+                        error == SpeechRecognizer.ERROR_AUDIO ||
+                        error == SpeechRecognizer.ERROR_SERVER ||
+                        error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS ||
+                        error == SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED
+                    when {
+                        isOfflineNetErr && localAiState.isWhistleReady -> {
+                            useCactusMicMode = true
+                            micNotice = "Offline detected — switched to Cactus Whistle. Tap mic to speak offline."
+                        }
+                        livePartialTranscript.isNotBlank() &&
+                            (error == SpeechRecognizer.ERROR_NO_MATCH || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) -> {
+                            val captured = livePartialTranscript.trim()
+                            livePartialTranscript = ""
+                            typedCommand = captured
+                            onParseCommand(captured, selectedGroupId, autoApplyToLedger, true)
+                        }
+                        isRomServiceError -> {
+                            // Headless SpeechRecognizer failed on this device — launch Android's reliable native mic dialog
+                            runCatching { speechRecognizer?.cancel() }
+                            if (!launchSystemVoiceDialog()) {
+                                micNotice = "Speech service busy (code $error). Tap mic again or switch to Cactus Whistle."
+                            }
+                        }
+                        error == SpeechRecognizer.ERROR_NO_MATCH || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> {
+                            micNotice = "Didn't catch that clearly — tap the mic and speak clearly, or tap System Mic."
+                        }
+                        else -> {
+                            micNotice = "Voice listener paused (code $error). Tap mic again or type below."
+                        }
                     }
                 }
                 override fun onResults(results: Bundle?) {
                     isLiveSpeechListening = false
                     liveSpeechAmplitude = 0f
-                    val heard = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.trim()
-                    if (!heard.isNullOrBlank()) {
-                        typedCommand = heard
-                        onParseCommand(heard, selectedGroupId, autoApplyToLedger, true)
+                    val candidates = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION).orEmpty()
+                    val bestHeard = LocalVoiceParser.pickBestTranscript(candidates, snapshot.members)
+                        .ifBlank { livePartialTranscript.trim() }
+                    livePartialTranscript = ""
+                    if (bestHeard.isNotBlank()) {
+                        micNotice = null
+                        typedCommand = bestHeard
+                        onParseCommand(bestHeard, selectedGroupId, autoApplyToLedger, true)
                     } else {
                         micNotice = "Heard nothing clearly — try speaking again or type below."
                     }
@@ -288,43 +373,40 @@ fun VoiceCommandSheet(
                 override fun onPartialResults(partialResults: Bundle?) {
                     val partial = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.trim()
                     if (!partial.isNullOrBlank()) {
+                        livePartialTranscript = partial
                         typedCommand = partial
                     }
                 }
                 override fun onEvent(eventType: Int, params: Bundle?) = Unit
             })
-            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-                putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
-            }
+            val intent = buildSpeechIntent()
             runCatching {
                 isLiveSpeechListening = true
                 recognizer.startListening(intent)
             }.onFailure {
                 isLiveSpeechListening = false
-                micNotice = "Could not start voice listener. Install Cactus Whistle or type below."
+                if (!launchSystemVoiceDialog()) {
+                    if (localAiState.isWhistleReady) {
+                        useCactusMicMode = true
+                        startCactusOfflineRecorder()
+                    } else {
+                        micNotice = "Could not start voice listener. Tap Get Whistle above or type below."
+                    }
+                }
             }
         }
     }
 
     val startListeningNow: () -> Unit = {
         micNotice = null
-        ttsEngine?.stop()
+        livePartialTranscript = ""
+        ttsManager.stop()
         onResetVoice()
         haptics.performHapticFeedback(HapticFeedbackType.LongPress)
         if (useCactusMicMode && localAiState.isWhistleReady) {
-            audioRecorder.startRecording(
-                onAutoStop = { wavBytes ->
-                    onProcessAudio(wavBytes, selectedGroupId, autoApplyToLedger)
-                },
-                onError = { err ->
-                    micNotice = err
-                }
-            )
+            startCactusOfflineRecorder()
         } else {
-            startDeviceSpeechFallback()
+            startDeviceSpeechRecognizer()
         }
     }
 
@@ -336,13 +418,13 @@ fun VoiceCommandSheet(
                 micNotice = null
                 onProcessAudio(wavBytes, selectedGroupId, autoApplyToLedger)
             } else {
-                micNotice = "Heard nothing clearly — speak for a second, then tap Stop."
+                micNotice = "Heard nothing clearly — speak for a second, then tap Done."
             }
         } else if (isLiveSpeechListening) {
-            stopLiveSpeech()
-            if (typedCommand.isNotBlank()) {
-                onParseCommand(typedCommand.trim(), selectedGroupId, autoApplyToLedger, true)
-            }
+            // Ask SpeechRecognizer to finalize & deliver onResults cleanly (do not cancel/double-submit)
+            runCatching { speechRecognizer?.stopListening() }
+            isLiveSpeechListening = false
+            liveSpeechAmplitude = 0f
         }
     }
 
@@ -401,7 +483,7 @@ fun VoiceCommandSheet(
         onDismissRequest = {
             audioRecorder.cancelRecording()
             stopLiveSpeech()
-            ttsEngine?.stop()
+            ttsManager.stop()
             onDismiss()
         },
         sheetState = sheetState,
@@ -462,14 +544,18 @@ fun VoiceCommandSheet(
                     }
                     Column {
                         Text(
-                            text = "Local Voice Assistant",
+                            text = "Voice Split Assistant",
                             style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
                             color = MaterialTheme.colorScheme.onSurface
                         )
                         Text(
-                            text = "On-device Cactus Whistle — zero cloud rate limits",
+                            text = if (ttsState.isSpeaking) {
+                                "Speaking confirmation aloud..."
+                            } else {
+                                "Live Smart Speech + Cactus Offline STT"
+                            },
                             style = MaterialTheme.typography.bodySmall,
-                            color = tokens.inkMuted
+                            color = if (ttsState.isSpeaking) tokens.acidLime else tokens.inkMuted
                         )
                     }
                 }
@@ -477,7 +563,11 @@ fun VoiceCommandSheet(
                     SpringIconButton(
                         onClick = {
                             speakRepliesAloud = !speakRepliesAloud
-                            if (!speakRepliesAloud) ttsEngine?.stop()
+                            if (!speakRepliesAloud) {
+                                ttsManager.stop()
+                            } else {
+                                ttsManager.speak("Voice replies enabled.")
+                            }
                         },
                         modifier = Modifier.testTag("voice_tts_toggle_button")
                     ) {
@@ -495,7 +585,7 @@ fun VoiceCommandSheet(
                         onClick = {
                             audioRecorder.cancelRecording()
                             stopLiveSpeech()
-                            ttsEngine?.stop()
+                            ttsManager.stop()
                             onDismiss()
                         }
                     ) {
@@ -546,9 +636,9 @@ fun VoiceCommandSheet(
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
                                 text = if (localAiState.isWhistleReady) {
-                                    "Cactus ${localAiState.whistleActiveSlug ?: "Whistle"} · Ready"
+                                    "Cactus Whistle · Ready"
                                 } else {
-                                    "On-Device Speech Engine"
+                                    "Cactus Whistle Offline Voice"
                                 },
                                 style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
                                 color = MaterialTheme.colorScheme.onSurface
@@ -566,7 +656,7 @@ fun VoiceCommandSheet(
                                     color = tokens.positiveContainer
                                 ) {
                                     Text(
-                                        text = "CACTUS",
+                                        text = "WHISTLE",
                                         style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
                                         color = tokens.positive,
                                         modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp)
@@ -596,48 +686,8 @@ fun VoiceCommandSheet(
                                     Icon(Icons.Rounded.Download, contentDescription = null, modifier = Modifier.size(14.dp))
                                     Spacer(Modifier.width(4.dp))
                                     Text(
-                                        text = if (localAiState.whistlePhase == LocalModelPhase.UNAVAILABLE) "Retry" else "Whistle",
+                                        text = if (localAiState.whistlePhase == LocalModelPhase.UNAVAILABLE) "Retry" else "Get Whistle",
                                         style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold)
-                                    )
-                                }
-                            }
-                        }
-                    }
-
-                    // Selectable Cactus Voice Model Catalog Chips (switch between Whistle / Whisper Base / Small / Tiny)
-                    if (localAiState.availableVoiceModels.isNotEmpty()) {
-                        FlowRow(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            localAiState.availableVoiceModels.take(4).forEach { model ->
-                                val isActive = localAiState.isWhistleReady && localAiState.whistleActiveSlug == model.slug
-                                val isBusy = localAiState.whistlePhase == LocalModelPhase.DOWNLOADING
-                                Surface(
-                                    shape = RoundedCornerShape(999.dp),
-                                    color = if (isActive) tokens.acidLime else tokens.cardSurface,
-                                    border = BorderStroke(
-                                        1.dp,
-                                        if (isActive) tokens.acidLime else tokens.hairline
-                                    ),
-                                    modifier = Modifier
-                                        .springClickable(enabled = !isBusy && !isActive) {
-                                            onInstallWhistle(model.slug)
-                                        }
-                                        .testTag("voice_model_chip_${model.slug}")
-                                ) {
-                                    Text(
-                                        text = buildString {
-                                            append(model.slug)
-                                            if (model.sizeMb > 0) append(" · ${model.sizeMb}MB")
-                                            if (isActive) append(" ✓")
-                                        },
-                                        style = MaterialTheme.typography.labelSmall.copy(
-                                            fontWeight = if (isActive) FontWeight.Bold else FontWeight.Medium
-                                        ),
-                                        color = if (isActive) tokens.onAcidLime else tokens.inkMuted,
-                                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp)
                                     )
                                 }
                             }
@@ -734,12 +784,33 @@ fun VoiceCommandSheet(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    // Mic Engine Switcher Pill: Cactus Offline STT vs Live Android SpeechRecognizer
+                    // Mic Engine Switcher Pill: Live Smart Speech (Primary) vs Cactus Offline STT
                     Row(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         val cactusSelected = useCactusMicMode && localAiState.isWhistleReady
+                        Surface(
+                            shape = RoundedCornerShape(999.dp),
+                            color = if (!cactusSelected) tokens.acidLime else tokens.onHero.copy(alpha = 0.10f),
+                            border = BorderStroke(
+                                1.dp,
+                                if (!cactusSelected) tokens.acidLime else tokens.onHero.copy(alpha = 0.20f)
+                            ),
+                            modifier = Modifier
+                                .springClickable(enabled = !isListeningActive) {
+                                    useCactusMicMode = false
+                                    micNotice = null
+                                }
+                                .testTag("mic_mode_device_pill")
+                        ) {
+                            Text(
+                                text = "Live Smart Speech",
+                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                color = if (!cactusSelected) tokens.onAcidLime else tokens.onHero.copy(alpha = 0.85f),
+                                modifier = Modifier.padding(horizontal = 11.dp, vertical = 5.dp)
+                            )
+                        }
                         Surface(
                             shape = RoundedCornerShape(999.dp),
                             color = if (cactusSelected) tokens.acidLime else tokens.onHero.copy(alpha = 0.10f),
@@ -759,11 +830,7 @@ fun VoiceCommandSheet(
                                 .testTag("mic_mode_cactus_pill")
                         ) {
                             Text(
-                                text = if (localAiState.isWhistleReady) {
-                                    "Cactus ${localAiState.whistleActiveSlug ?: "STT"}"
-                                } else {
-                                    "Download Cactus STT"
-                                },
+                                text = if (localAiState.isWhistleReady) "Whistle Offline" else "Get Whistle",
                                 style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
                                 color = if (cactusSelected) tokens.onAcidLime else tokens.onHero.copy(alpha = 0.85f),
                                 modifier = Modifier.padding(horizontal = 11.dp, vertical = 5.dp)
@@ -771,22 +838,22 @@ fun VoiceCommandSheet(
                         }
                         Surface(
                             shape = RoundedCornerShape(999.dp),
-                            color = if (!cactusSelected) tokens.acidLime else tokens.onHero.copy(alpha = 0.10f),
-                            border = BorderStroke(
-                                1.dp,
-                                if (!cactusSelected) tokens.acidLime else tokens.onHero.copy(alpha = 0.20f)
-                            ),
+                            color = tokens.onHero.copy(alpha = 0.10f),
+                            border = BorderStroke(1.dp, tokens.onHero.copy(alpha = 0.20f)),
                             modifier = Modifier
                                 .springClickable(enabled = !isListeningActive) {
-                                    useCactusMicMode = false
                                     micNotice = null
+                                    ttsManager.stop()
+                                    if (!launchSystemVoiceDialog()) {
+                                        micNotice = "System Voice dialog unavailable on this device."
+                                    }
                                 }
-                                .testTag("mic_mode_device_pill")
+                                .testTag("mic_mode_system_dialog_pill")
                         ) {
                             Text(
-                                text = "Live Device Mic",
+                                text = "System Mic",
                                 style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
-                                color = if (!cactusSelected) tokens.onAcidLime else tokens.onHero.copy(alpha = 0.85f),
+                                color = tokens.onHero.copy(alpha = 0.85f),
                                 modifier = Modifier.padding(horizontal = 11.dp, vertical = 5.dp)
                             )
                         }
@@ -848,13 +915,19 @@ fun VoiceCommandSheet(
 
                     Text(
                         text = when {
-                            isWavRecording -> "Recording for Whistle... (${elapsedSeconds}s) — tap Stop"
-                            isLiveSpeechListening -> "Listening locally... speak naturally"
-                            voiceState is AsyncUiState.Loading -> "Transcribing locally & updating account..."
-                            else -> "Tap mic or type \"Tanmay owes me 500 rupees\""
+                            isLiveSpeechListening && livePartialTranscript.isNotBlank() ->
+                                "\"$livePartialTranscript\""
+                            isLiveSpeechListening ->
+                                "Listening... say \"Tanmay owes me 500 rupees\""
+                            isWavRecording ->
+                                "Recording offline (${elapsedSeconds}s) — pauses auto-stop or tap Done"
+                            voiceState is AsyncUiState.Loading ->
+                                "Updating your ledger..."
+                            else ->
+                                "Tap mic & speak naturally — auto-stops when you finish"
                         },
                         style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
-                        color = tokens.onHero,
+                        color = if (isLiveSpeechListening && livePartialTranscript.isNotBlank()) tokens.acidLime else tokens.onHero,
                         textAlign = TextAlign.Center
                     )
 
@@ -958,6 +1031,20 @@ fun VoiceCommandSheet(
             if (micNotice != null) {
                 Text(
                     text = micNotice.orEmpty(),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = tokens.warning
+                )
+            }
+
+            if (speakRepliesAloud && ttsState.isVolumeMuted) {
+                Text(
+                    text = "Media volume is muted — turn up device volume to hear spoken confirmations.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = tokens.warning
+                )
+            } else if (speakRepliesAloud && ttsState.errorMessage != null) {
+                Text(
+                    text = "TTS notice: ${ttsState.errorMessage}",
                     style = MaterialTheme.typography.bodySmall,
                     color = tokens.warning
                 )
@@ -1151,6 +1238,28 @@ fun VoiceCommandSheet(
                                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f)
                                         )
                                     }
+                                    if (parsed.assistantReply.isNotBlank()) {
+                                        SpringIconButton(
+                                            onClick = {
+                                                if (ttsState.isSpeaking) {
+                                                    ttsManager.stop()
+                                                } else {
+                                                    ttsManager.speak(parsed.assistantReply)
+                                                }
+                                            },
+                                            modifier = Modifier.testTag("voice_replay_tts_button")
+                                        ) {
+                                            Icon(
+                                                imageVector = if (ttsState.isSpeaking) {
+                                                    Icons.Rounded.Stop
+                                                } else {
+                                                    Icons.AutoMirrored.Rounded.VolumeUp
+                                                },
+                                                contentDescription = if (ttsState.isSpeaking) "Stop speaking" else "Replay spoken reply",
+                                                tint = if (isUserOwed) tokens.positive else tokens.negative
+                                            )
+                                        }
+                                    }
                                 }
                             }
 
@@ -1229,7 +1338,7 @@ fun VoiceCommandSheet(
                             if (result.applied) {
                                 SpringButton(
                                     onClick = {
-                                        ttsEngine?.stop()
+                                        ttsManager.stop()
                                         onNavigateToActivity()
                                     },
                                     shape = RoundedCornerShape(999.dp),
@@ -1274,7 +1383,7 @@ fun VoiceCommandSheet(
                                     if (result.savedExpenseId != null) {
                                         SpringOutlinedButton(
                                             onClick = {
-                                                ttsEngine?.stop()
+                                                ttsManager.stop()
                                                 onUndoApplied(result)
                                             },
                                             shape = RoundedCornerShape(999.dp),

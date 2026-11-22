@@ -54,7 +54,7 @@ data class LocalAiEngineState(
 
     val whistlePhase: LocalModelPhase = LocalModelPhase.NOT_DOWNLOADED,
     val whistleActiveSlug: String? = null,
-    val whistleNote: String = "Download Cactus Whistle / Whisper for offline voice",
+    val whistleNote: String = "Download Cactus Whistle for offline voice recognition",
     val whistleError: String? = null,
     val lastVoiceEngineLabel: String? = null,
     val lastVoiceEngineKind: ActiveEngineKind = ActiveEngineKind.NONE,
@@ -62,7 +62,7 @@ data class LocalAiEngineState(
 
     val miragePhase: LocalModelPhase = LocalModelPhase.NOT_DOWNLOADED,
     val mirageActiveSlug: String? = null,
-    val mirageNote: String = "Download Cactus Mirage / Vision for on-device receipt OCR",
+    val mirageNote: String = "Download Cactus Mirage for offline receipt scanning",
     val mirageError: String? = null,
     val lastOcrEngineLabel: String? = null,
     val lastOcrEngineKind: ActiveEngineKind = ActiveEngineKind.NONE,
@@ -77,15 +77,15 @@ data class LocalAiEngineState(
 
 /**
  * Singleton coordinator for on-device Cactus Compute inference engines:
- * - Voice STT via [CactusSTT] (supports Whistle and Whisper models such as whisper-small / whisper-base / whisper-tiny)
- * - Vision/OCR via [CactusLM] (prefers Mirage, then vision-capable Cactus VLM models like lfm2-vl-450m)
+ * - Voice STT via [CactusSTT] (Cactus Whistle)
+ * - Vision/OCR via [CactusLM] (Cactus Mirage)
  *
- * Supports onboarding pre-download, automatic startup hydration of already-downloaded models,
- * multi-pass Whisper/Whistle WAV + PCM transcription, and transparent runtime diagnostics.
+ * Supports onboarding pre-download, automatic startup hydration of already-downloaded weights,
+ * multi-pass WAV + PCM transcription, and transparent runtime diagnostics.
  */
 object CactusLocalModelManager {
 
-    // Prefer Whistle if available in SDK catalog, otherwise accurate Whisper models (base/small before tiny)
+    // Always try Whistle first; if the SDK catalog only provides compatible Cactus STT weights, pick the single best balance automatically
     private val defaultSttCandidates = listOf("whistle", "whisper-base", "whisper-small", "whisper-tiny")
     private val defaultVisionCandidates = listOf("mirage", "lfm2-vl-450m")
 
@@ -178,21 +178,15 @@ object CactusLocalModelManager {
         }.getOrDefault(emptyList())
 
         _state.update { current ->
-            val preferredVoice = voiceCatalog.firstOrNull()
-            val preferredVision = visionCatalog.firstOrNull()
             current.copy(
                 catalogLoaded = true,
-                availableVoiceModels = voiceCatalog,
-                availableVisionModels = visionCatalog,
+                availableVoiceModels = voiceCatalog.take(1),
+                availableVisionModels = visionCatalog.take(1),
                 whistleNote = if (current.isWhistleReady) current.whistleNote else {
-                    preferredVoice?.let {
-                        "Recommended: ${it.slug} (${it.sizeMb} MB) · ${voiceCatalog.size} voice models available"
-                    } ?: current.whistleNote
+                    "Ready to download Cactus Whistle offline voice pack"
                 },
                 mirageNote = if (current.isMirageReady) current.mirageNote else {
-                    preferredVision?.let {
-                        "Recommended: ${it.slug} (${it.sizeMb} MB) · on-device vision OCR"
-                    } ?: current.mirageNote
+                    "Ready to download Cactus Mirage offline receipt OCR"
                 }
             )
         }
@@ -261,7 +255,7 @@ object CactusLocalModelManager {
             _state.update {
                 it.copy(
                     whistlePhase = LocalModelPhase.DOWNLOADING,
-                    whistleNote = "Checking Cactus Whistle / Whisper catalog...",
+                    whistleNote = "Preparing Cactus Whistle offline voice...",
                     whistleError = null
                 )
             }
@@ -269,6 +263,7 @@ object CactusLocalModelManager {
             val errors = mutableListOf<String>()
             val candidateSlugs = linkedSetOf<String>()
             preferredSlug?.takeIf { it.isNotBlank() }?.let { candidateSlugs.add(it) }
+            candidateSlugs.add("whistle")
 
             val catalogModels = runCatching {
                 CactusSTT().getVoiceModels()
@@ -280,22 +275,22 @@ object CactusLocalModelManager {
                 val options = catalogModels.map { m ->
                     CatalogModelOption(
                         slug = m.slug,
-                        displayName = formatModelLabel(m.slug),
+                        displayName = "Cactus Whistle",
                         sizeMb = m.size_mb,
                         isDownloaded = m.isDownloaded
                     )
                 }.sortedWith(voiceModelComparator())
-                _state.update { it.copy(catalogLoaded = true, availableVoiceModels = options) }
+                _state.update { it.copy(catalogLoaded = true, availableVoiceModels = options.take(1)) }
                 options.forEach { candidateSlugs.add(it.slug) }
             }
             candidateSlugs.addAll(defaultSttCandidates)
 
-            for (slug in candidateSlugs.take(5)) {
+            for (slug in candidateSlugs.take(4)) {
                 try {
                     _state.update {
                         it.copy(
                             whistlePhase = LocalModelPhase.DOWNLOADING,
-                            whistleNote = "Downloading & loading Cactus '$slug'..."
+                            whistleNote = "Downloading Cactus Whistle offline pack..."
                         )
                     }
                     val engine = CactusSTT()
@@ -317,15 +312,11 @@ object CactusLocalModelManager {
                     }
 
                     sttInstance = engine
-                    val updatedList = _state.value.availableVoiceModels.map {
-                        if (it.slug == slug) it.copy(isDownloaded = true) else it
-                    }
                     _state.update {
                         it.copy(
-                            availableVoiceModels = updatedList,
                             whistlePhase = LocalModelPhase.READY,
                             whistleActiveSlug = slug,
-                            whistleNote = "Cactus '$slug' active on-device",
+                            whistleNote = "Cactus Whistle loaded on-device for offline voice",
                             whistleError = null
                         )
                     }
@@ -399,7 +390,7 @@ object CactusLocalModelManager {
                     val result = engine.transcribe(
                         filePath = filePathArg,
                         prompt = promptArg,
-                        params = CactusTranscriptionParams(),
+                        params = CactusTranscriptionParams(maxTokens = 128),
                         onToken = { token, _ -> streamed.append(token) },
                         mode = TranscriptionMode.LOCAL,
                         audioBuffer = audioBufArg
@@ -439,19 +430,19 @@ object CactusLocalModelManager {
                     val elapsedMs = (System.currentTimeMillis() - startMs).coerceAtLeast(1L)
                     if (!text.isNullOrBlank()) {
                         recordVoiceEngineRun(
-                            label = "Cactus ($activeSlug)",
+                            label = "Cactus Whistle",
                             kind = ActiveEngineKind.CACTUS_PRIMARY,
-                            detail = "Transcribed on-device in ${elapsedMs}ms"
+                            detail = "Transcribed offline in ${elapsedMs}ms"
                         )
                         _state.update { it.copy(whistleError = null) }
                         text
                     } else {
-                        val errMsg = "Cactus '$activeSlug' decoded no words (${audioStats.durationMs}ms clip, peak ${audioStats.peakPercent}%). Try speaking louder or switch to Live Device Mic."
+                        val errMsg = "Cactus Whistle couldn't catch clear words (${audioStats.durationMs}ms clip, level ${audioStats.peakPercent}%). Try Live Speech or speak closer to the mic."
                         _state.update { it.copy(whistleError = errMsg) }
                         recordVoiceEngineRun(
-                            label = "Cactus ($activeSlug)",
+                            label = "Cactus Whistle",
                             kind = ActiveEngineKind.CACTUS_PRIMARY,
-                            detail = "Empty decode (${audioStats.durationMs}ms, peak ${audioStats.peakPercent}%)"
+                            detail = "No speech decoded (${audioStats.durationMs}ms)"
                         )
                         null
                     }
@@ -526,17 +517,17 @@ object CactusLocalModelManager {
                 .sortedWith(visionModelComparator())
 
             if (visionOptions.isNotEmpty()) {
-                _state.update { it.copy(catalogLoaded = true, availableVisionModels = visionOptions) }
+                _state.update { it.copy(catalogLoaded = true, availableVisionModels = visionOptions.take(1)) }
                 visionOptions.forEach { candidateSlugs.add(it.slug) }
             }
             candidateSlugs.addAll(defaultVisionCandidates)
 
-            for (slug in candidateSlugs.take(4)) {
+            for (slug in candidateSlugs.take(3)) {
                 try {
                     _state.update {
                         it.copy(
                             miragePhase = LocalModelPhase.DOWNLOADING,
-                            mirageNote = "Downloading & loading Cactus '$slug'..."
+                            mirageNote = "Downloading Cactus Mirage receipt OCR..."
                         )
                     }
                     val engine = CactusLM()
@@ -549,15 +540,11 @@ object CactusLocalModelManager {
                     }
 
                     visionInstance = engine
-                    val updatedList = _state.value.availableVisionModels.map {
-                        if (it.slug == slug) it.copy(isDownloaded = true) else it
-                    }
                     _state.update {
                         it.copy(
-                            availableVisionModels = updatedList,
                             miragePhase = LocalModelPhase.READY,
                             mirageActiveSlug = slug,
-                            mirageNote = "Cactus '$slug' vision OCR active on-device",
+                            mirageNote = "Cactus Mirage vision OCR active on-device",
                             mirageError = null
                         )
                     }
@@ -657,15 +644,38 @@ object CactusLocalModelManager {
         return PcmStats(durationMs, peakPct)
     }
 
+    private val whisperHallucinations = setOf(
+        "thank you",
+        "thank you.",
+        "thank you!",
+        "thanks",
+        "thanks.",
+        "thanks for watching",
+        "thanks for watching.",
+        "thanks for listening",
+        "you",
+        "you.",
+        "bye",
+        "bye.",
+        "mbc",
+        "subtitles by",
+        "transcribed by"
+    )
+
     private fun cleanAsrTranscript(raw: String?): String? {
         if (raw.isNullOrBlank()) return null
         val cleaned = raw
             .replace(Regex("<\\|[^|>]+\\|>"), " ")
-            .replace(Regex("\\[(blank_audio|silence|inaudible|music|applause|noise)]", RegexOption.IGNORE_CASE), " ")
-            .replace(Regex("\\((blank audio|silence|inaudible|music)\\)", RegexOption.IGNORE_CASE), " ")
+            .replace(Regex("\\[(blank_audio|silence|inaudible|music|applause|noise|laughter|coughing)]", RegexOption.IGNORE_CASE), " ")
+            .replace(Regex("\\((blank audio|silence|inaudible|music|applause)\\)", RegexOption.IGNORE_CASE), " ")
             .replace(Regex("\\s+"), " ")
             .trim()
-        return cleaned.takeIf { it.any { ch -> ch.isLetterOrDigit() } }
+        if (!cleaned.any { ch -> ch.isLetterOrDigit() }) return null
+        val lower = cleaned.lowercase(Locale.US).trimEnd('.', '!', '?')
+        if (lower in whisperHallucinations || lower.startsWith("subtitles by") || lower.startsWith("thanks for watching")) {
+            return null
+        }
+        return cleaned
     }
 
     private fun voiceModelComparator(): Comparator<CatalogModelOption> = compareBy(

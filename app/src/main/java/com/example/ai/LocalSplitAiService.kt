@@ -90,15 +90,11 @@ class LocalSplitAiService(
     ): ParsedVoiceSplit = withContext(Dispatchers.Default) {
         val label = if (fromDeviceSpeechFallback) {
             CactusLocalModelManager.recordVoiceEngineRun(
-                label = "Android SpeechRecognizer (Fallback)",
+                label = "Live Smart Speech (N-Best)",
                 kind = ActiveEngineKind.LOCAL_FALLBACK,
-                detail = if (CactusLocalModelManager.state.value.whistleError != null) {
-                    "Fallback after Whistle error"
-                } else {
-                    "Whistle not installed — used on-device Android speech"
-                }
+                detail = "Real-time Android SpeechRecognizer + friend-name ranking"
             )
-            "Android SpeechRecognizer (Fallback)"
+            "Live Smart Speech"
         } else {
             CactusLocalModelManager.recordVoiceEngineRun(
                 label = "Local Text Parser",

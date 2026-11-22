@@ -27,12 +27,20 @@ private const val SAMPLE_RATE_HZ = 16_000
 private const val CHANNEL_CONFIG = AudioFormat.CHANNEL_IN_MONO
 private const val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
 private const val MAX_RECORD_SECONDS = 25
-private const val PAD_SILENCE_SAMPLES = SAMPLE_RATE_HZ / 4 // 250ms padding before & after speech
+private const val PAD_SILENCE_SAMPLES = SAMPLE_RATE_HZ / 5 // 200ms clean silence margin
+private const val EDGE_CLICK_TRIM_SAMPLES = SAMPLE_RATE_HZ / 12 // ~83ms button-tap click trim
+private const val VAD_FRAME_SAMPLES = SAMPLE_RATE_HZ / 50 // 20ms frame (320 samples)
+private const val VAD_SPEECH_RMS_THRESHOLD = 420f
+private const val VAD_AUTO_STOP_SILENCE_MS = 1_650L
+private const val VAD_MIN_SPEECH_BEFORE_AUTO_STOP_MS = 450L
 
 /**
- * In-app PCM -> WAV audio recorder designed for on-device Cactus Whistle / Whisper transcription.
- * Captures 16 kHz 16-bit mono PCM, peak-normalizes quiet recordings, and pads leading/trailing
- * silence so local ASR models never clip the first or last words.
+ * High-clarity 16 kHz mono PCM -> WAV recorder tuned for on-device ASR (Whistle / Whisper).
+ * Features:
+ * - DC offset removal + 80 Hz high-pass filter to strip mic rumble and handling thumps
+ * - Start/end tap-click trimming so button presses aren't decoded as gibberish
+ * - Energy-based Voice Activity Detection (VAD) for silence trimming & automatic end-of-speech
+ * - Gentle RMS-guided normalization (capped at 4x) that clarifies speech without boosting background hiss
  */
 class VoiceAudioRecorder {
 
@@ -54,6 +62,7 @@ class VoiceAudioRecorder {
 
     @SuppressLint("MissingPermission")
     fun startRecording(
+        enableVadAutoStop: Boolean = true,
         onAutoStop: (ByteArray) -> Unit = {},
         onError: (String) -> Unit = {}
     ): Boolean {
@@ -66,8 +75,6 @@ class VoiceAudioRecorder {
         }
         val bufferSize = (minBuf * 2).coerceAtLeast(4096)
 
-        // Prefer MIC first (includes platform mic gain on OnePlus/Realme/Xiaomi devices),
-        // falling back to VOICE_RECOGNITION if MIC cannot initialize.
         val recorder = try {
             AudioRecord(
                 MediaRecorder.AudioSource.MIC,
@@ -112,6 +119,10 @@ class VoiceAudioRecorder {
             captureJob = scope.launch {
                 val readBuffer = ShortArray(bufferSize / 2)
                 val startTimeMs = System.currentTimeMillis()
+                var speechDetectedMs = 0L
+                var lastVoiceMs = startTimeMs
+                var hasHeardSpeech = false
+
                 while (isActive && _isRecording.value) {
                     val readCount = recorder.read(readBuffer, 0, readBuffer.size)
                     if (readCount > 0) {
@@ -126,13 +137,31 @@ class VoiceAudioRecorder {
                         synchronized(out) {
                             out.write(byteChunk)
                         }
+
                         val rms = sqrt(sumSquares / readCount).toFloat()
-                        val normalized = (rms / 5500f).coerceIn(0.06f, 1f)
+                        val normalized = (rms / 4800f).coerceIn(0.06f, 1f)
                         _amplitude.value = normalized
 
-                        val elapsed = ((System.currentTimeMillis() - startTimeMs) / 1000L).toInt()
-                        _elapsedSeconds.value = elapsed
-                        if (elapsed >= MAX_RECORD_SECONDS) {
+                        val nowMs = System.currentTimeMillis()
+                        val elapsedMs = nowMs - startTimeMs
+                        val elapsedSec = (elapsedMs / 1000L).toInt()
+                        _elapsedSeconds.value = elapsedSec
+
+                        // Ignore initial 180ms tap sound before tracking speech activity
+                        if (elapsedMs > 180L && rms >= VAD_SPEECH_RMS_THRESHOLD) {
+                            if (!hasHeardSpeech) {
+                                hasHeardSpeech = true
+                            }
+                            speechDetectedMs += (readCount * 1000L) / SAMPLE_RATE_HZ
+                            lastVoiceMs = nowMs
+                        }
+
+                        val shouldVadStop = enableVadAutoStop &&
+                            hasHeardSpeech &&
+                            speechDetectedMs >= VAD_MIN_SPEECH_BEFORE_AUTO_STOP_MS &&
+                            (nowMs - lastVoiceMs) >= VAD_AUTO_STOP_SILENCE_MS
+
+                        if (shouldVadStop || elapsedSec >= MAX_RECORD_SECONDS) {
                             val wav = finalizeInternal()
                             if (wav != null && wav.size > 44) {
                                 onAutoStopCallback?.invoke(wav)
@@ -153,7 +182,7 @@ class VoiceAudioRecorder {
         }
     }
 
-    /** Stops recording and returns the normalized, silence-padded WAV bytes (or null if too short). */
+    /** Stops recording and returns the DSP-conditioned WAV bytes (or null if too short). */
     fun stopRecording(): ByteArray? = finalizeInternal()
 
     /** Cancels recording and discards audio data. */
@@ -190,7 +219,7 @@ class VoiceAudioRecorder {
         // Require at least ~0.25s of audio (~8 KB at 16kHz 16-bit mono)
         if (rawPcm.size < 4000) return null
 
-        val preparedPcm = normalizeAndPadPcm16(rawPcm)
+        val preparedPcm = conditionSpeechPcm16(rawPcm)
         return wrapPcmInWav(preparedPcm)
     }
 
@@ -200,42 +229,101 @@ class VoiceAudioRecorder {
     }
 
     /**
-     * Peak-normalizes quiet speech recordings toward ~72% full scale (max 8x gain)
-     * and adds 250ms silence margins before & after speech for clean Whisper/Whistle decoding.
+     * Conditions 16 kHz mono PCM for ASR:
+     * 1. Trims ~83ms finger-tap transients from start/end (when clip is long enough).
+     * 2. Applies DC offset removal + gentle 1st-order high-pass filter (~80 Hz).
+     * 3. Uses 20ms-frame energy VAD to trim excessive leading/trailing dead air.
+     * 4. Applies gentle RMS-guided gain (capped at 4x) without amplifying noise floor into hallucinations.
+     * 5. Adds clean 200ms zero-silence margins before & after speech.
      */
-    private fun normalizeAndPadPcm16(pcmBytes: ByteArray): ByteArray {
-        val sampleCount = pcmBytes.size / 2
-        if (sampleCount <= 0) return pcmBytes
+    private fun conditionSpeechPcm16(pcmBytes: ByteArray): ByteArray {
+        val rawCount = pcmBytes.size / 2
+        if (rawCount <= 0) return pcmBytes
 
-        var peakAbs = 0
-        for (i in 0 until sampleCount) {
-            val lo = pcmBytes[i * 2].toInt() and 0xFF
-            val hi = pcmBytes[i * 2 + 1].toInt()
-            val sample = (hi shl 8) or lo
-            val absVal = abs(sample)
-            if (absVal > peakAbs) peakAbs = absVal
+        // Trim button-tap clicks at edges if clip > 0.6s
+        val trimStart = if (rawCount > SAMPLE_RATE_HZ * 6 / 10) EDGE_CLICK_TRIM_SAMPLES else 0
+        val trimEnd = if (rawCount > SAMPLE_RATE_HZ * 6 / 10) rawCount - EDGE_CLICK_TRIM_SAMPLES else rawCount
+        val count = (trimEnd - trimStart).coerceAtLeast(1)
+
+        val samples = FloatArray(count)
+        var meanSum = 0.0
+        for (i in 0 until count) {
+            val srcIdx = (trimStart + i) * 2
+            val lo = pcmBytes[srcIdx].toInt() and 0xFF
+            val hi = pcmBytes[srcIdx + 1].toInt()
+            val v = ((hi shl 8) or lo).toFloat()
+            samples[i] = v
+            meanSum += v
+        }
+        val dcOffset = (meanSum / count).toFloat()
+
+        // 1st-order high-pass filter (~80 Hz @ 16kHz, alpha ~ 0.969)
+        val alpha = 0.969f
+        var prevIn = 0f
+        var prevOut = 0f
+        for (i in 0 until count) {
+            val centered = samples[i] - dcOffset
+            val hp = alpha * (prevOut + centered - prevIn)
+            prevIn = centered
+            prevOut = hp
+            samples[i] = hp
         }
 
-        val gain = if (peakAbs in 120..18_000) {
-            (23_500f / peakAbs.toFloat()).coerceIn(1f, 8f)
+        // Frame-based VAD to trim leading/trailing silence while keeping 160ms speech context
+        val numFrames = count / VAD_FRAME_SAMPLES
+        var activeStart = 0
+        var activeEnd = count
+        if (numFrames >= 6) {
+            val frameRms = FloatArray(numFrames)
+            var maxFrameRms = 0f
+            for (f in 0 until numFrames) {
+                var sq = 0.0
+                val base = f * VAD_FRAME_SAMPLES
+                for (j in 0 until VAD_FRAME_SAMPLES) {
+                    val s = samples[base + j]
+                    sq += s * s
+                }
+                val r = sqrt(sq / VAD_FRAME_SAMPLES).toFloat()
+                frameRms[f] = r
+                if (r > maxFrameRms) maxFrameRms = r
+            }
+            val dynamicThreshold = (maxFrameRms * 0.12f).coerceAtLeast(220f)
+            val firstSpeech = frameRms.indexOfFirst { it >= dynamicThreshold }
+            val lastSpeech = frameRms.indexOfLast { it >= dynamicThreshold }
+            if (firstSpeech in 0..lastSpeech) {
+                val contextFrames = 8 // 160ms pre/post margin
+                activeStart = ((firstSpeech - contextFrames).coerceAtLeast(0)) * VAD_FRAME_SAMPLES
+                activeEnd = (((lastSpeech + contextFrames + 1).coerceAtMost(numFrames)) * VAD_FRAME_SAMPLES)
+                    .coerceAtMost(count)
+            }
+        }
+
+        val activeLen = (activeEnd - activeStart).coerceAtLeast(1)
+        var peakAbs = 0f
+        var activeSqSum = 0.0
+        for (i in activeStart until activeEnd) {
+            val v = samples[i]
+            val a = abs(v)
+            if (a > peakAbs) peakAbs = a
+            activeSqSum += v * v
+        }
+        val activeRms = sqrt(activeSqSum / activeLen).toFloat()
+
+        // Gentle RMS target (~3600) bounded by peak headroom (24000) and max 4x gain
+        val gain = if (activeRms > 140f && peakAbs > 250f) {
+            val rmsGain = 3600f / activeRms
+            val peakLimitGain = 24_000f / peakAbs
+            minOf(rmsGain, peakLimitGain).coerceIn(1f, 4f)
         } else {
             1f
         }
 
-        val totalSamples = PAD_SILENCE_SAMPLES + sampleCount + PAD_SILENCE_SAMPLES
+        val totalSamples = PAD_SILENCE_SAMPLES + activeLen + PAD_SILENCE_SAMPLES
         val out = ByteArray(totalSamples * 2)
-        val startByteOffset = PAD_SILENCE_SAMPLES * 2
-
-        for (i in 0 until sampleCount) {
-            val lo = pcmBytes[i * 2].toInt() and 0xFF
-            val hi = pcmBytes[i * 2 + 1].toInt()
-            val sample = (hi shl 8) or lo
-            val scaled = if (gain > 1.02f) {
-                (sample * gain).roundToInt().coerceIn(-32_767, 32_767)
-            } else {
-                sample
-            }
-            val dst = startByteOffset + i * 2
+        val startOffset = PAD_SILENCE_SAMPLES * 2
+        for (i in 0 until activeLen) {
+            val scaled = (samples[activeStart + i] * gain).roundToInt().coerceIn(-32_767, 32_767)
+            val dst = startOffset + i * 2
             out[dst] = (scaled and 0xFF).toByte()
             out[dst + 1] = ((scaled shr 8) and 0xFF).toByte()
         }
@@ -244,19 +332,19 @@ class VoiceAudioRecorder {
 
     private fun wrapPcmInWav(pcmData: ByteArray): ByteArray {
         val totalDataLen = pcmData.size + 36
-        val byteRate = SAMPLE_RATE_HZ * 2 // 16-bit mono = 2 bytes per sample
+        val byteRate = SAMPLE_RATE_HZ * 2
         val header = ByteBuffer.allocate(44).order(ByteOrder.LITTLE_ENDIAN).apply {
             put("RIFF".toByteArray(Charsets.US_ASCII))
             putInt(totalDataLen)
             put("WAVE".toByteArray(Charsets.US_ASCII))
             put("fmt ".toByteArray(Charsets.US_ASCII))
             putInt(16)
-            putShort(1) // AudioFormat = 1 (PCM)
-            putShort(1) // NumChannels = 1 (Mono)
+            putShort(1) // PCM
+            putShort(1) // Mono
             putInt(SAMPLE_RATE_HZ)
             putInt(byteRate)
-            putShort(2) // BlockAlign
-            putShort(16) // BitsPerSample
+            putShort(2)
+            putShort(16)
             put("data".toByteArray(Charsets.US_ASCII))
             putInt(pcmData.size)
         }.array()

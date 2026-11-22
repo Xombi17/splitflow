@@ -121,7 +121,7 @@ private val ONBOARDING_SLIDES = listOf(
     OnboardingSlideData(
         eyebrow = "ON-DEVICE AI SETUP",
         title = "Download local Voice & OCR models",
-        description = "Pre-download Cactus Whistle / Whisper for offline voice commands and Cactus Mirage / Vision for receipt OCR right now — zero cloud rate limits."
+        description = "Pre-download Cactus Whistle for offline voice commands and Cactus Mirage for receipt scanning right now — zero cloud rate limits."
     )
 )
 
@@ -1011,44 +1011,40 @@ private fun SlideOnDeviceModelSetup(
                 }
             }
 
-            // 1. Voice Model Row (Whistle / Whisper)
+            // 1. Voice Model Row (Cactus Whistle)
             OnboardingModelRow(
                 icon = Icons.Rounded.Mic,
-                title = "Voice AI (Whistle / Whisper)",
+                title = "Cactus Whistle",
                 subtitle = when {
                     localAiState.isWhistleReady ->
-                        "Loaded: ${localAiState.whistleActiveSlug ?: "whistle"}"
+                        "Ready on-device for offline voice splits"
                     localAiState.whistlePhase == LocalModelPhase.DOWNLOADING ->
-                        localAiState.whistleNote
-                    recommendedVoice != null ->
-                        "Model: ${recommendedVoice.slug} (${recommendedVoice.sizeMb} MB)"
+                        "Downloading Whistle offline voice pack..."
                     else ->
-                        "Cactus Whistle / Whisper speech-to-text"
+                        "On-device offline speech-to-text"
                 },
                 phase = localAiState.whistlePhase,
                 errorText = localAiState.whistleError,
                 buttonTag = "onboarding_download_voice_button",
-                onDownload = { onDownloadVoice(recommendedVoice?.slug) }
+                onDownload = { onDownloadVoice(null) }
             )
 
-            // 2. Vision OCR Model Row (Mirage / Cactus VLM)
+            // 2. Vision OCR Model Row (Cactus Mirage)
             OnboardingModelRow(
                 icon = Icons.Rounded.DocumentScanner,
-                title = "Receipt OCR (Mirage / Vision)",
+                title = "Cactus Mirage",
                 subtitle = when {
                     localAiState.isMirageReady ->
-                        "Loaded: ${localAiState.mirageActiveSlug ?: "mirage"}"
+                        "Ready on-device for receipt scanning"
                     localAiState.miragePhase == LocalModelPhase.DOWNLOADING ->
-                        localAiState.mirageNote
-                    recommendedVision != null ->
-                        "Model: ${recommendedVision.slug} (${recommendedVision.sizeMb} MB)"
+                        "Downloading Mirage receipt OCR pack..."
                     else ->
-                        "Cactus Mirage vision OCR + ML Kit fallback"
+                        "On-device receipt scanner & line-item OCR"
                 },
                 phase = localAiState.miragePhase,
                 errorText = localAiState.mirageError,
                 buttonTag = "onboarding_download_vision_button",
-                onDownload = { onDownloadVision(recommendedVision?.slug) }
+                onDownload = { onDownloadVision(null) }
             )
 
             // One-tap Download Both Models CTA

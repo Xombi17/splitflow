@@ -27,9 +27,9 @@ private const val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
 private const val MAX_RECORD_SECONDS = 25
 
 /**
- * In-app PCM -> WAV audio recorder designed for multimodal Gemini 3.8 Flash voice transcription.
- * Captures 16 kHz 16-bit mono WAV (32 KB/s, max ~800 KB for 25s — well under Gemini's 20 MB limit)
- * while emitting real-time normalized microphone amplitude (0f..1f) for the AI Voice Orb & waveform.
+ * In-app PCM -> WAV audio recorder designed for on-device Cactus Whistle voice transcription.
+ * Captures 16 kHz 16-bit mono WAV (32 KB/s, max ~800 KB for 25s) while emitting real-time
+ * normalized microphone amplitude (0f..1f) for the AI Voice Orb & waveform.
  */
 class VoiceAudioRecorder {
 

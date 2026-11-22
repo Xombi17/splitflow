@@ -1,6 +1,7 @@
 package com.example.ai
 
 import android.content.Context
+import android.os.Build
 import android.util.Log
 import com.cactus.CactusCompletionParams
 import com.cactus.CactusContextInitializer
@@ -18,6 +19,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.util.Locale
 
 private const val LOG_TAG = "CactusLocalModels"
 
@@ -28,13 +30,29 @@ enum class LocalModelPhase {
     UNAVAILABLE
 }
 
+enum class ActiveEngineKind {
+    NONE,
+    CACTUS_PRIMARY,
+    LOCAL_FALLBACK,
+    TEXT_PARSER
+}
+
 data class LocalAiEngineState(
     val whistlePhase: LocalModelPhase = LocalModelPhase.NOT_DOWNLOADED,
     val whistleActiveSlug: String? = null,
-    val whistleNote: String = "Tap to install Cactus Whistle (~17 MB) for offline neural STT",
+    val whistleNote: String = "Tap Install to download Cactus Whistle for offline neural STT",
+    val whistleError: String? = null,
+    val lastVoiceEngineLabel: String? = null,
+    val lastVoiceEngineKind: ActiveEngineKind = ActiveEngineKind.NONE,
+    val lastVoiceDetail: String? = null,
+
     val miragePhase: LocalModelPhase = LocalModelPhase.NOT_DOWNLOADED,
     val mirageActiveSlug: String? = null,
-    val mirageNote: String = "Tap to install Cactus Mirage (~22 MB) for local neural OCR"
+    val mirageNote: String = "Tap Install to download Cactus Mirage for local neural OCR",
+    val mirageError: String? = null,
+    val lastOcrEngineLabel: String? = null,
+    val lastOcrEngineKind: ActiveEngineKind = ActiveEngineKind.NONE,
+    val lastOcrDetail: String? = null
 ) {
     val isWhistleReady: Boolean get() = whistlePhase == LocalModelPhase.READY
     val isMirageReady: Boolean get() = miragePhase == LocalModelPhase.READY
@@ -42,22 +60,25 @@ data class LocalAiEngineState(
 
 /**
  * Singleton coordinator for on-device Cactus Compute inference engines:
- * - Whistle (tiny speech-to-text) via [CactusSTT]
- * - Mirage (tiny vision/OCR) via [CactusLM]
+ * - Voice STT via [CactusSTT] (prefers Whistle, then smallest available Cactus voice model such as whisper-tiny)
+ * - Vision/OCR via [CactusLM] (prefers Mirage, then smallest vision-capable Cactus model)
  *
- * Gracefully catches native ABI/link errors (such as x86_64 emulators) so callers
- * can seamlessly fall back to Android on-device SpeechRecognizer and ML Kit OCR.
+ * Surfaces exact download, ABI, and initialization errors in [state] and records which engine
+ * actually ran on every voice transcription and receipt OCR pass.
  */
 object CactusLocalModelManager {
 
-    private val sttCandidates = listOf("whistle", "whisper-tiny")
-    private val visionCandidates = listOf("mirage", "lfm2-vl-450m")
+    private val defaultSttCandidates = listOf("whistle", "whisper-tiny", "whisper-base")
+    private val defaultVisionCandidates = listOf("mirage", "lfm2-vl-450m")
 
     private val sttLock = Mutex()
     private val visionLock = Mutex()
 
     @Volatile
     private var contextInitialized = false
+
+    @Volatile
+    private var contextInitError: String? = null
 
     private var sttInstance: CactusSTT? = null
     private var visionInstance: CactusLM? = null
@@ -70,54 +91,141 @@ object CactusLocalModelManager {
         runCatching {
             CactusContextInitializer.initialize(context.applicationContext)
             contextInitialized = true
+            contextInitError = null
         }.onFailure { err ->
-            Log.w(LOG_TAG, "Cactus context initialization unavailable on this runtime", err)
+            val msg = "${err.javaClass.simpleName}: ${err.message ?: "Cactus context init failed"}"
+            contextInitError = msg
+            Log.w(LOG_TAG, "Cactus context initialization failed: $msg", err)
+        }
+    }
+
+    fun recordVoiceEngineRun(label: String, kind: ActiveEngineKind, detail: String? = null) {
+        _state.update {
+            it.copy(
+                lastVoiceEngineLabel = label,
+                lastVoiceEngineKind = kind,
+                lastVoiceDetail = detail
+            )
+        }
+    }
+
+    fun recordOcrEngineRun(label: String, kind: ActiveEngineKind, detail: String? = null) {
+        _state.update {
+            it.copy(
+                lastOcrEngineLabel = label,
+                lastOcrEngineKind = kind,
+                lastOcrDetail = detail
+            )
         }
     }
 
     suspend fun prepareWhistle(context: Context): Boolean = withContext(Dispatchers.IO) {
         sttLock.withLock {
-            if (_state.value.isWhistleReady && sttInstance != null) return@withLock true
+            val current = sttInstance
+            if (_state.value.isWhistleReady && current != null && runCatching { current.isReady() }.getOrDefault(false)) {
+                return@withLock true
+            }
+
             initContext(context)
+            contextInitError?.let { initErr ->
+                _state.update {
+                    it.copy(
+                        whistlePhase = LocalModelPhase.UNAVAILABLE,
+                        whistleNote = "Cactus runtime init failed — falling back to Android SpeechRecognizer",
+                        whistleError = initErr
+                    )
+                }
+                return@withLock false
+            }
+
             _state.update {
                 it.copy(
                     whistlePhase = LocalModelPhase.DOWNLOADING,
-                    whistleNote = "Downloading & loading Cactus Whistle..."
+                    whistleNote = "Checking Cactus voice model catalog...",
+                    whistleError = null
                 )
             }
 
-            var lastError: Throwable? = null
-            for (slug in sttCandidates) {
+            val errors = mutableListOf<String>()
+            val candidateSlugs = linkedSetOf<String>()
+
+            // Discover live voice slugs supported by this Cactus SDK build first
+            val catalogModels = runCatching {
+                CactusSTT().getVoiceModels()
+            }.onFailure { err ->
+                errors.add("Catalog lookup failed (${err.javaClass.simpleName}: ${err.message ?: "offline"})")
+            }.getOrDefault(emptyList())
+
+            if (catalogModels.isNotEmpty()) {
+                catalogModels
+                    .sortedWith(
+                        compareBy<com.cactus.VoiceModel>(
+                            { !it.slug.lowercase(Locale.US).contains("whistle") },
+                            { !it.slug.lowercase(Locale.US).contains("whisper-tiny") },
+                            { !it.slug.lowercase(Locale.US).contains("moonshine") },
+                            { it.size_mb }
+                        )
+                    )
+                    .forEach { candidateSlugs.add(it.slug) }
+            }
+            candidateSlugs.addAll(defaultSttCandidates)
+
+            for (slug in candidateSlugs.take(4)) {
                 try {
+                    _state.update {
+                        it.copy(
+                            whistlePhase = LocalModelPhase.DOWNLOADING,
+                            whistleNote = "Downloading & initializing Cactus '$slug'..."
+                        )
+                    }
                     val engine = CactusSTT()
-                    engine.downloadModel(slug)
+                    val alreadyLocal = runCatching { engine.isModelDownloaded(slug) }.getOrDefault(false)
+                    if (!alreadyLocal) {
+                        engine.downloadModel(slug)
+                    }
+                    val downloadedNow = runCatching { engine.isModelDownloaded(slug) }.getOrDefault(true)
+                    if (!downloadedNow) {
+                        errors.add("'$slug': download did not persist weights")
+                        continue
+                    }
+
                     engine.initializeModel(CactusInitParams(model = slug))
+                    val ready = runCatching { engine.isReady() }.getOrDefault(false)
+                    if (!ready) {
+                        errors.add("'$slug': initializeModel finished but engine.isReady() is false")
+                        continue
+                    }
+
                     sttInstance = engine
                     _state.update {
                         it.copy(
                             whistlePhase = LocalModelPhase.READY,
                             whistleActiveSlug = slug,
-                            whistleNote = "Cactus $slug active on-device"
+                            whistleNote = "Cactus '$slug' loaded on-device",
+                            whistleError = null
                         )
                     }
                     return@withLock true
                 } catch (err: Throwable) {
-                    lastError = err
-                    Log.w(LOG_TAG, "Cactus STT slug '$slug' failed: ${err.message}")
+                    val detail = "'$slug': ${err.javaClass.simpleName}: ${err.message ?: "unknown error"}"
+                    errors.add(detail)
+                    Log.w(LOG_TAG, "Cactus STT candidate failed: $detail", err)
                     if (err is UnsatisfiedLinkError || err is NoClassDefFoundError) {
+                        errors.add("Device ABI: ${Build.SUPPORTED_ABIS.joinToString()}")
                         break
                     }
                 }
             }
 
-            val reason = when (lastError) {
-                is UnsatisfiedLinkError -> "Native ARM64 runtime unavailable — using local device speech engine"
-                else -> "Using local device speech engine (Whistle download offline)"
+            val summaryError = errors.joinToString(" | ").ifBlank {
+                "Cactus STT could not download or initialize on this device."
             }
             _state.update {
                 it.copy(
                     whistlePhase = LocalModelPhase.UNAVAILABLE,
-                    whistleNote = reason
+                    whistleActiveSlug = null,
+                    whistleNote = "Cactus STT unavailable — using Android SpeechRecognizer fallback",
+                    whistleError = summaryError
                 )
             }
             false
@@ -126,21 +234,57 @@ object CactusLocalModelManager {
 
     suspend fun transcribeWavWithWhistle(context: Context, wavFile: File): String? =
         withContext(Dispatchers.IO) {
-            if (!wavFile.exists() || wavFile.length() <= 44L) return@withContext null
+            if (!wavFile.exists() || wavFile.length() <= 44L) {
+                _state.update { it.copy(whistleError = "Recorded audio clip was empty.") }
+                return@withContext null
+            }
             if (!_state.value.isWhistleReady) {
                 val ok = prepareWhistle(context)
                 if (!ok) return@withContext null
             }
             sttLock.withLock {
-                val engine = sttInstance ?: return@withLock null
+                val engine = sttInstance
+                val activeSlug = _state.value.whistleActiveSlug ?: "whistle"
+                if (engine == null || !runCatching { engine.isReady() }.getOrDefault(false)) {
+                    val errMsg = "Cactus STT engine '$activeSlug' is not loaded (isReady=false)."
+                    _state.update {
+                        it.copy(
+                            whistlePhase = LocalModelPhase.UNAVAILABLE,
+                            whistleError = errMsg
+                        )
+                    }
+                    return@withLock null
+                }
+                val startMs = System.currentTimeMillis()
                 try {
                     val output = engine.transcribe(
                         filePath = wavFile.absolutePath,
                         params = CactusTranscriptionParams()
                     )
-                    output?.text?.trim()?.takeIf { it.isNotEmpty() }
+                    val text = output?.text?.trim().orEmpty()
+                    val elapsedMs = (System.currentTimeMillis() - startMs).coerceAtLeast(1L)
+                    if (text.isNotEmpty()) {
+                        recordVoiceEngineRun(
+                            label = "Cactus Whistle ($activeSlug)",
+                            kind = ActiveEngineKind.CACTUS_PRIMARY,
+                            detail = "Transcribed on-device in ${elapsedMs}ms"
+                        )
+                        _state.update { it.copy(whistleError = null) }
+                        text
+                    } else {
+                        val errMsg = "Cactus '$activeSlug' returned an empty transcript for this clip."
+                        _state.update { it.copy(whistleError = errMsg) }
+                        recordVoiceEngineRun(
+                            label = "Cactus Whistle ($activeSlug)",
+                            kind = ActiveEngineKind.CACTUS_PRIMARY,
+                            detail = errMsg
+                        )
+                        null
+                    }
                 } catch (err: Throwable) {
-                    Log.w(LOG_TAG, "Whistle transcription error", err)
+                    val errMsg = "Cactus '$activeSlug' transcribe failed: ${err.javaClass.simpleName}: ${err.message ?: "unknown error"}"
+                    Log.w(LOG_TAG, errMsg, err)
+                    _state.update { it.copy(whistleError = errMsg) }
                     null
                 }
             }
@@ -148,47 +292,99 @@ object CactusLocalModelManager {
 
     suspend fun prepareMirage(context: Context): Boolean = withContext(Dispatchers.IO) {
         visionLock.withLock {
-            if (_state.value.isMirageReady && visionInstance != null) return@withLock true
+            val current = visionInstance
+            if (_state.value.isMirageReady && current != null && runCatching { current.isLoaded() }.getOrDefault(false)) {
+                return@withLock true
+            }
+
             initContext(context)
+            contextInitError?.let { initErr ->
+                _state.update {
+                    it.copy(
+                        miragePhase = LocalModelPhase.UNAVAILABLE,
+                        mirageNote = "Cactus runtime init failed — falling back to ML Kit OCR",
+                        mirageError = initErr
+                    )
+                }
+                return@withLock false
+            }
+
             _state.update {
                 it.copy(
                     miragePhase = LocalModelPhase.DOWNLOADING,
-                    mirageNote = "Downloading & loading Cactus Mirage..."
+                    mirageNote = "Checking Cactus vision model catalog...",
+                    mirageError = null
                 )
             }
 
-            var lastError: Throwable? = null
-            for (slug in visionCandidates) {
+            val errors = mutableListOf<String>()
+            val candidateSlugs = linkedSetOf<String>()
+
+            val catalogModels = runCatching {
+                CactusLM().getModels()
+            }.onFailure { err ->
+                errors.add("Catalog lookup failed (${err.javaClass.simpleName}: ${err.message ?: "offline"})")
+            }.getOrDefault(emptyList())
+
+            catalogModels
+                .filter { it.supports_vision || it.slug.lowercase(Locale.US).contains("mirage") || it.slug.lowercase(Locale.US).contains("vl") }
+                .sortedWith(
+                    compareBy<com.cactus.CactusModel>(
+                        { !it.slug.lowercase(Locale.US).contains("mirage") },
+                        { it.size_mb }
+                    )
+                )
+                .forEach { candidateSlugs.add(it.slug) }
+
+            candidateSlugs.addAll(defaultVisionCandidates)
+
+            for (slug in candidateSlugs.take(3)) {
                 try {
+                    _state.update {
+                        it.copy(
+                            miragePhase = LocalModelPhase.DOWNLOADING,
+                            mirageNote = "Downloading & loading Cactus '$slug'..."
+                        )
+                    }
                     val engine = CactusLM()
                     engine.downloadModel(slug)
                     engine.initializeModel(CactusInitParams(model = slug, contextSize = 2048))
+                    val loaded = runCatching { engine.isLoaded() }.getOrDefault(false)
+                    if (!loaded) {
+                        errors.add("'$slug': initializeModel finished but engine.isLoaded() is false")
+                        continue
+                    }
+
                     visionInstance = engine
                     _state.update {
                         it.copy(
                             miragePhase = LocalModelPhase.READY,
                             mirageActiveSlug = slug,
-                            mirageNote = "Cactus $slug OCR active on-device"
+                            mirageNote = "Cactus '$slug' vision OCR active on-device",
+                            mirageError = null
                         )
                     }
                     return@withLock true
                 } catch (err: Throwable) {
-                    lastError = err
-                    Log.w(LOG_TAG, "Cactus Vision slug '$slug' failed: ${err.message}")
+                    val detail = "'$slug': ${err.javaClass.simpleName}: ${err.message ?: "unknown error"}"
+                    errors.add(detail)
+                    Log.w(LOG_TAG, "Cactus Vision candidate failed: $detail", err)
                     if (err is UnsatisfiedLinkError || err is NoClassDefFoundError) {
+                        errors.add("Device ABI: ${Build.SUPPORTED_ABIS.joinToString()}")
                         break
                     }
                 }
             }
 
-            val reason = when (lastError) {
-                is UnsatisfiedLinkError -> "Native ARM64 runtime unavailable — using on-device ML Kit OCR"
-                else -> "Using instant on-device ML Kit OCR (Mirage offline)"
+            val summaryError = errors.joinToString(" | ").ifBlank {
+                "Cactus Mirage vision model could not download or initialize."
             }
             _state.update {
                 it.copy(
                     miragePhase = LocalModelPhase.UNAVAILABLE,
-                    mirageNote = reason
+                    mirageActiveSlug = null,
+                    mirageNote = "Cactus Mirage unavailable — using ML Kit On-Device OCR fallback",
+                    mirageError = summaryError
                 )
             }
             false
@@ -199,7 +395,18 @@ object CactusLocalModelManager {
         withContext(Dispatchers.IO) {
             if (!imageFile.exists() || !_state.value.isMirageReady) return@withContext null
             visionLock.withLock {
-                val engine = visionInstance ?: return@withContext null
+                val engine = visionInstance
+                val activeSlug = _state.value.mirageActiveSlug ?: "mirage"
+                if (engine == null || !runCatching { engine.isLoaded() }.getOrDefault(false)) {
+                    _state.update {
+                        it.copy(
+                            miragePhase = LocalModelPhase.UNAVAILABLE,
+                            mirageError = "Cactus '$activeSlug' is not loaded (isLoaded=false)."
+                        )
+                    }
+                    return@withLock null
+                }
+                val startMs = System.currentTimeMillis()
                 try {
                     val messages = listOf(
                         ChatMessage(
@@ -212,13 +419,24 @@ object CactusLocalModelManager {
                         messages = messages,
                         params = CactusCompletionParams(temperature = 0.1, maxTokens = 768)
                     )
-                    if (completion?.success == true) {
-                        completion.response?.trim()?.takeIf { it.isNotEmpty() }
+                    val elapsedMs = (System.currentTimeMillis() - startMs).coerceAtLeast(1L)
+                    if (completion?.success == true && !completion.response.isNullOrBlank()) {
+                        recordOcrEngineRun(
+                            label = "Cactus Mirage ($activeSlug)",
+                            kind = ActiveEngineKind.CACTUS_PRIMARY,
+                            detail = "OCR completed on-device in ${elapsedMs}ms"
+                        )
+                        _state.update { it.copy(mirageError = null) }
+                        completion.response?.trim()
                     } else {
+                        val errMsg = "Cactus '$activeSlug' returned no receipt text (success=${completion?.success})."
+                        _state.update { it.copy(mirageError = errMsg) }
                         null
                     }
                 } catch (err: Throwable) {
-                    Log.w(LOG_TAG, "Mirage vision OCR failed", err)
+                    val errMsg = "Cactus '$activeSlug' OCR failed: ${err.javaClass.simpleName}: ${err.message ?: "unknown error"}"
+                    Log.w(LOG_TAG, errMsg, err)
+                    _state.update { it.copy(mirageError = errMsg) }
                     null
                 }
             }

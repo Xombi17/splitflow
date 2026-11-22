@@ -77,6 +77,7 @@ import androidx.compose.material.icons.rounded.Memory
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.foundation.layout.heightIn
 import com.example.R
+import com.example.ai.ActiveEngineKind
 import com.example.ai.LocalAiEngineState
 import com.example.ai.LocalModelPhase
 import com.example.data.ReceiptPhotoStore
@@ -290,83 +291,164 @@ fun ExpenseLensSheet(
                     }
                 }
 
-                // Cactus Mirage On-Device OCR Control Strip
+                // Cactus Mirage On-Device OCR Control Strip + Live Engine Badge + Visible Error
                 Surface(
                     shape = RoundedCornerShape(16.dp),
                     color = tokens.elevatedSurface,
                     border = BorderStroke(
                         1.dp,
-                        if (localAiState.isMirageReady) tokens.positive.copy(alpha = 0.45f) else tokens.hairline
+                        when {
+                            localAiState.mirageError != null -> tokens.negative.copy(alpha = 0.45f)
+                            localAiState.isMirageReady -> tokens.positive.copy(alpha = 0.45f)
+                            else -> tokens.hairline
+                        }
                     ),
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Row(
+                    Column(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(horizontal = 12.dp, vertical = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Memory,
-                            contentDescription = null,
-                            tint = if (localAiState.isMirageReady) tokens.positive else tokens.acidLime,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = if (localAiState.isMirageReady) {
-                                    "Cactus ${localAiState.mirageActiveSlug ?: "Mirage"} OCR · Ready"
-                                } else {
-                                    "On-Device Receipt OCR"
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Memory,
+                                contentDescription = null,
+                                tint = when {
+                                    localAiState.mirageError != null -> tokens.negative
+                                    localAiState.isMirageReady -> tokens.positive
+                                    else -> tokens.acidLime
                                 },
-                                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
-                                color = MaterialTheme.colorScheme.onSurface
+                                modifier = Modifier.size(18.dp)
                             )
-                            Text(
-                                text = localAiState.mirageNote,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = tokens.inkMuted
-                            )
-                        }
-                        when (localAiState.miragePhase) {
-                            LocalModelPhase.READY -> {
-                                Surface(
-                                    shape = RoundedCornerShape(999.dp),
-                                    color = tokens.positiveContainer
-                                ) {
-                                    Text(
-                                        text = "LOCAL",
-                                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
-                                        color = tokens.positive,
-                                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp)
-                                    )
-                                }
-                            }
-                            LocalModelPhase.DOWNLOADING -> {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(20.dp),
-                                    strokeWidth = 2.dp,
-                                    color = tokens.acidLime
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = if (localAiState.isMirageReady) {
+                                        "Cactus ${localAiState.mirageActiveSlug ?: "Mirage"} OCR · Ready"
+                                    } else {
+                                        "On-Device Receipt OCR"
+                                    },
+                                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    text = localAiState.mirageNote,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = tokens.inkMuted
                                 )
                             }
-                            LocalModelPhase.NOT_DOWNLOADED, LocalModelPhase.UNAVAILABLE -> {
-                                SpringButton(
-                                    onClick = onInstallMirage,
-                                    shape = RoundedCornerShape(999.dp),
-                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                                    colors = ButtonDefaults.buttonColors(
-                                        containerColor = tokens.obsidian,
-                                        contentColor = tokens.onObsidian
-                                    ),
-                                    modifier = Modifier
-                                        .heightIn(min = 36.dp)
-                                        .testTag("install_mirage_button")
-                                ) {
-                                    Icon(Icons.Rounded.Download, contentDescription = null, modifier = Modifier.size(14.dp))
-                                    Spacer(Modifier.width(4.dp))
-                                    Text("Mirage", style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold))
+                            when (localAiState.miragePhase) {
+                                LocalModelPhase.READY -> {
+                                    Surface(
+                                        shape = RoundedCornerShape(999.dp),
+                                        color = tokens.positiveContainer
+                                    ) {
+                                        Text(
+                                            text = "CACTUS",
+                                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                            color = tokens.positive,
+                                            modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp)
+                                        )
+                                    }
                                 }
+                                LocalModelPhase.DOWNLOADING -> {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(20.dp),
+                                        strokeWidth = 2.dp,
+                                        color = tokens.acidLime
+                                    )
+                                }
+                                LocalModelPhase.NOT_DOWNLOADED, LocalModelPhase.UNAVAILABLE -> {
+                                    SpringButton(
+                                        onClick = onInstallMirage,
+                                        shape = RoundedCornerShape(999.dp),
+                                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = tokens.obsidian,
+                                            contentColor = tokens.onObsidian
+                                        ),
+                                        modifier = Modifier
+                                            .heightIn(min = 36.dp)
+                                            .testTag("install_mirage_button")
+                                    ) {
+                                        Icon(Icons.Rounded.Download, contentDescription = null, modifier = Modifier.size(14.dp))
+                                        Spacer(Modifier.width(4.dp))
+                                        Text(
+                                            text = if (localAiState.miragePhase == LocalModelPhase.UNAVAILABLE) "Retry" else "Mirage",
+                                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        // Live Engine Run Status Badge (shows which OCR engine actually ran)
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("ocr_live_engine_badge"),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            val isPrimary = localAiState.lastOcrEngineKind == ActiveEngineKind.CACTUS_PRIMARY
+                            val isFallback = localAiState.lastOcrEngineKind == ActiveEngineKind.LOCAL_FALLBACK
+                            val pillBg = when {
+                                isPrimary -> tokens.positiveContainer
+                                isFallback -> tokens.warningContainer
+                                else -> tokens.cardSurface
+                            }
+                            val pillInk = when {
+                                isPrimary -> tokens.positive
+                                isFallback -> tokens.warning
+                                else -> tokens.inkMuted
+                            }
+                            Surface(
+                                shape = RoundedCornerShape(999.dp),
+                                color = pillBg,
+                                border = BorderStroke(1.dp, pillInk.copy(alpha = 0.35f))
+                            ) {
+                                Text(
+                                    text = localAiState.lastOcrEngineLabel?.let { "Last scan: $it" }
+                                        ?: if (localAiState.isMirageReady) "Engine ready: Cactus Mirage"
+                                        else "Active fallback: ML Kit On-Device OCR",
+                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                    color = pillInk,
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                                )
+                            }
+                            localAiState.lastOcrDetail?.let { detail ->
+                                Text(
+                                    text = detail,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = tokens.inkMuted,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                        }
+
+                        // Visible Cactus Download / Init Error Detail
+                        localAiState.mirageError?.let { errText ->
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = tokens.negativeContainer,
+                                border = BorderStroke(1.dp, tokens.negative.copy(alpha = 0.35f)),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("mirage_error_banner")
+                            ) {
+                                Text(
+                                    text = "Mirage init/OCR error: $errText",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = tokens.negative,
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp)
+                                )
                             }
                         }
                     }

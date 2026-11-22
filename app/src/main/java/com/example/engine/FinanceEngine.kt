@@ -375,7 +375,7 @@ object FinanceEngine {
             val diff = expectedGrandTotalMinor - computedGrandTotal
             val largestMember = totalsByMember.maxByOrNull { it.value }?.key
             if (largestMember != null) {
-                totalsByMember[largestMember] = (totalsByMember[largestMember]!! + diff).coerceAtLeast(0L)
+                totalsByMember[largestMember] = ((totalsByMember[largestMember] ?: 0L) + diff).coerceAtLeast(0L)
             }
         }
 

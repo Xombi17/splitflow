@@ -141,9 +141,11 @@ class SplitFlowViewModel(
         viewModelScope.launch {
             val ok = localAiService.downloadWhistleModel()
             if (ok) {
-                showToast("Cactus Whistle installed on-device")
+                val slug = localAiEngineState.value.whistleActiveSlug ?: "Whistle"
+                showToast("Cactus '$slug' ready on-device")
             } else {
-                showToast(localAiEngineState.value.whistleNote)
+                val err = localAiEngineState.value.whistleError ?: localAiEngineState.value.whistleNote
+                showToast("Cactus STT failed: $err", isError = true)
             }
         }
     }
@@ -152,9 +154,11 @@ class SplitFlowViewModel(
         viewModelScope.launch {
             val ok = localAiService.downloadMirageModel()
             if (ok) {
-                showToast("Cactus Mirage OCR installed on-device")
+                val slug = localAiEngineState.value.mirageActiveSlug ?: "Mirage"
+                showToast("Cactus '$slug' OCR ready on-device")
             } else {
-                showToast(localAiEngineState.value.mirageNote)
+                val err = localAiEngineState.value.mirageError ?: localAiEngineState.value.mirageNote
+                showToast("Cactus OCR failed: $err", isError = true)
             }
         }
     }
@@ -352,7 +356,8 @@ class SplitFlowViewModel(
     fun parseNaturalLanguageSplit(
         transcript: String,
         targetGroupId: String?,
-        autoApply: Boolean = true
+        autoApply: Boolean = true,
+        fromDeviceSpeechFallback: Boolean = false
     ) {
         val currentSnapshot = (ledgerState.value as? LedgerUiState.Ready)?.snapshot ?: return
         val trimmed = transcript.trim()
@@ -370,7 +375,8 @@ class SplitFlowViewModel(
                     members = currentSnapshot.members,
                     groups = currentSnapshot.groups,
                     defaultCurrency = targetGroup?.currencyEnum ?: currentSnapshot.defaultCurrency,
-                    groupMemoryNotes = targetGroup?.splitMemoryNotes
+                    groupMemoryNotes = targetGroup?.splitMemoryNotes,
+                    fromDeviceSpeechFallback = fromDeviceSpeechFallback
                 )
                 handleParsedVoiceCommand(
                     parsed = parsed,

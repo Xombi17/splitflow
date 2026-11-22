@@ -38,7 +38,8 @@ object LocalReceiptOcrEngine {
         val scaled = scaleBitmap(bitmap, maxDim = 1400)
 
         // 1. Try Cactus Mirage if installed & active on this device
-        val mirageLines = if (CactusLocalModelManager.state.value.isMirageReady) {
+        val engineState = CactusLocalModelManager.state.value
+        val mirageLines = if (engineState.isMirageReady) {
             val tempFile = writeTempJpeg(context, scaled)
             try {
                 CactusLocalModelManager.extractReceiptTextWithMirage(context, tempFile)
@@ -53,11 +54,27 @@ object LocalReceiptOcrEngine {
             emptyList()
         }
 
-        // 2. Fallback or supplement with on-device ML Kit spatial OCR
+        // 2. Fallback to on-device ML Kit spatial OCR when Mirage is not ready or returned too few lines
         val ocrLines = if (mirageLines.size >= 3) {
             mirageLines
         } else {
-            runMlKitSpatialOcr(scaled)
+            val mlStartMs = System.currentTimeMillis()
+            val mlLines = runMlKitSpatialOcr(scaled)
+            val elapsedMs = (System.currentTimeMillis() - mlStartMs).coerceAtLeast(1L)
+            val reason = when {
+                !engineState.isMirageReady && engineState.mirageError != null ->
+                    "Fallback after Mirage error (${elapsedMs}ms)"
+                !engineState.isMirageReady ->
+                    "Mirage not installed — ran ML Kit in ${elapsedMs}ms"
+                else ->
+                    "Mirage returned ${mirageLines.size} lines — fell back to ML Kit (${elapsedMs}ms)"
+            }
+            CactusLocalModelManager.recordOcrEngineRun(
+                label = "ML Kit On-Device OCR (Fallback)",
+                kind = ActiveEngineKind.LOCAL_FALLBACK,
+                detail = reason
+            )
+            mlLines
         }
 
         if (ocrLines.isEmpty()) {

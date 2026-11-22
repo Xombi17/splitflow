@@ -182,7 +182,7 @@ fun AuthScreen(
                             contentScale = ContentScale.Crop
                         )
                         AiBadge(
-                            label = "GEMINI RECEIPT & VOICE ENGINE",
+                            label = "CACTUS ON-DEVICE VOICE & OCR",
                             modifier = Modifier
                                 .align(Alignment.TopStart)
                                 .padding(12.dp)

@@ -208,7 +208,11 @@ fun PaymentNudgeSheet(
                             type = "text/plain"
                             putExtra(Intent.EXTRA_TEXT, nudgeText)
                         }
-                        context.startActivity(Intent.createChooser(fallback, "Send payment nudge"))
+                        runCatching {
+                            context.startActivity(Intent.createChooser(fallback, "Send payment nudge"))
+                        }.onFailure {
+                            onFeedback("No messaging app available — tap Copy instead")
+                        }
                     }
                 },
                 modifier = Modifier

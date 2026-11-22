@@ -463,7 +463,7 @@ fun AiShimmerSkeleton(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            AiBadge("GEMINI 3.8 FLASH")
+            AiBadge("ON-DEVICE AI")
             Text(
                 text = label,
                 style = MaterialTheme.typography.bodyMedium,

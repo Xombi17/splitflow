@@ -225,7 +225,7 @@ fun TripWrapUpSheet(
                             )
                         }
 
-                        // Live Gemini 3.8 Flash Editorial Narrative
+                        // Local On-Device Editorial Narrative
                         when (storyState) {
                             is AsyncUiState.Idle, is AsyncUiState.Loading -> {
                                 AiShimmerSkeleton(label = "Writing your AI Ledger Story...")

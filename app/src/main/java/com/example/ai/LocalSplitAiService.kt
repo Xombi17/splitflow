@@ -19,7 +19,7 @@ import java.io.File
  * 100% on-device AI service for SplitFlow.
  * Powered by Cactus Compute Whistle (STT) & Mirage (Vision/OCR), with instant local fallbacks
  * (Android SpeechRecognizer + ML Kit Text Recognition + local financial parsers).
- * Makes zero cloud Gemini / AI Studio requests and never hits API rate limits.
+ * Makes zero cloud AI requests and never hits API rate limits.
  */
 class LocalSplitAiService(
     private val appContext: Context
@@ -40,6 +40,12 @@ class LocalSplitAiService(
         return LocalReceiptOcrEngine.analyzeReceiptBitmap(appContext, bitmap)
     }
 
+    /**
+     * 100% on-device AI service for SplitFlow.
+     * Powered by Cactus Compute Whistle (STT) & Mirage (Vision/OCR), with instant local fallbacks
+     * (Android SpeechRecognizer + ML Kit Text Recognition + local financial parsers).
+     * Makes zero cloud AI requests and never hits API rate limits.
+     */
     suspend fun transcribeAndParseVoiceAudio(
         wavAudioBytes: ByteArray,
         members: List<LedgerMember>,
@@ -51,16 +57,23 @@ class LocalSplitAiService(
         try {
             wavFile.writeBytes(wavAudioBytes)
             val transcript = CactusLocalModelManager.transcribeWavWithWhistle(appContext, wavFile)
-                ?: throw IllegalStateException(
-                    "Cactus Whistle could not transcribe this recording. Tap \"Install Whistle\" or use live voice/text input below."
-                )
-            val slug = CactusLocalModelManager.state.value.whistleActiveSlug ?: "Whistle"
+                ?: run {
+                    val detail = CactusLocalModelManager.state.value.whistleError
+                    throw IllegalStateException(
+                        if (!detail.isNullOrBlank()) {
+                            "Cactus Whistle error: $detail"
+                        } else {
+                            "Cactus Whistle could not transcribe this clip. Retry download or use live speech / text below."
+                        }
+                    )
+                }
+            val slug = CactusLocalModelManager.state.value.whistleActiveSlug ?: "whistle"
             LocalVoiceParser.parse(
                 rawInput = transcript,
                 members = members,
                 groups = groups,
                 defaultCurrency = defaultCurrency,
-                engineLabel = "Cactus $slug"
+                engineLabel = "Cactus Whistle ($slug)"
             )
         } finally {
             wavFile.delete()
@@ -72,9 +85,28 @@ class LocalSplitAiService(
         members: List<LedgerMember>,
         groups: List<ExpenseGroup> = emptyList(),
         defaultCurrency: CurrencyCode,
-        groupMemoryNotes: String? = null
+        groupMemoryNotes: String? = null,
+        fromDeviceSpeechFallback: Boolean = false
     ): ParsedVoiceSplit = withContext(Dispatchers.Default) {
-        val label = CactusLocalModelManager.state.value.whistleActiveSlug?.let { "Cactus $it" } ?: "On-Device Engine"
+        val label = if (fromDeviceSpeechFallback) {
+            CactusLocalModelManager.recordVoiceEngineRun(
+                label = "Android SpeechRecognizer (Fallback)",
+                kind = ActiveEngineKind.LOCAL_FALLBACK,
+                detail = if (CactusLocalModelManager.state.value.whistleError != null) {
+                    "Fallback after Whistle error"
+                } else {
+                    "Whistle not installed — used on-device Android speech"
+                }
+            )
+            "Android SpeechRecognizer (Fallback)"
+        } else {
+            CactusLocalModelManager.recordVoiceEngineRun(
+                label = "Local Text Parser",
+                kind = ActiveEngineKind.TEXT_PARSER,
+                detail = "Parsed typed command directly on-device"
+            )
+            "Local Text Parser"
+        }
         LocalVoiceParser.parse(
             rawInput = transcript,
             members = members,

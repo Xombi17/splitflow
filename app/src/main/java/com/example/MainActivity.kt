@@ -24,8 +24,10 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
@@ -39,8 +41,11 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.outlined.Dashboard
 import androidx.compose.material.icons.outlined.Groups
 import androidx.compose.material.icons.outlined.PeopleOutline
@@ -57,6 +62,7 @@ import androidx.compose.material.icons.rounded.LocalBar
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.People
 import androidx.compose.material.icons.rounded.ReceiptLong
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
@@ -69,6 +75,8 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.NavigationRail
 import androidx.compose.material3.NavigationRailItem
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
@@ -96,8 +104,12 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
+import com.example.ui.motion.SpringButton
 import androidx.credentials.CredentialManager
 import androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory.Companion.APPLICATION_KEY
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -841,6 +853,18 @@ private fun AuthenticatedSplitFlowShell(
 
             if (showQuickAddChooser) {
                 QuickAddChooserSheet(
+                    onQuickSendCommand = { command ->
+                        showQuickAddChooser = false
+                        val scopeGroupId = if (currentTab == SplitFlowTab.GROUPS) selectedGroupId else null
+                        viewModel.resetVoiceSplit()
+                        showVoiceSplitter = true
+                        viewModel.parseNaturalLanguageSplit(
+                            transcript = command,
+                            targetGroupId = scopeGroupId,
+                            autoApply = true,
+                            fromDeviceSpeechFallback = false
+                        )
+                    },
                     onSelectCreateGroup = {
                         showQuickAddChooser = false
                         openCreateGroup(GroupCategory.TRIP, null)
@@ -984,8 +1008,8 @@ private fun AuthenticatedSplitFlowShell(
                     onProcessAudio = { wavBytes, grpId, autoApply ->
                         viewModel.processVoiceAudio(wavBytes, grpId, autoApply)
                     },
-                    onParseCommand = { cmd, grpId, autoApply ->
-                        viewModel.parseNaturalLanguageSplit(cmd, grpId, autoApply)
+                    onParseCommand = { cmd, grpId, autoApply, fromFallback ->
+                        viewModel.parseNaturalLanguageSplit(cmd, grpId, autoApply, fromFallback)
                     },
                     onCommitPending = { res, title, grpId ->
                         viewModel.commitPendingVoiceResult(res, title, grpId)
@@ -1354,6 +1378,7 @@ private fun SplitFlowTabBody(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun QuickAddChooserSheet(
+    onQuickSendCommand: (String) -> Unit,
     onSelectCreateGroup: () -> Unit,
     onSelectDiningStudio: () -> Unit,
     onSelectAiLens: () -> Unit,
@@ -1364,6 +1389,23 @@ private fun QuickAddChooserSheet(
     onDismiss: () -> Unit
 ) {
     val tokens = SplitFlowThemeTokens.colors
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val focusManager = LocalFocusManager.current
+    var quickCommand by remember { mutableStateOf("") }
+    var quickHint by remember { mutableStateOf<String?>(null) }
+
+    val submitQuickCommand: () -> Unit = {
+        val cleaned = quickCommand.trim()
+        if (cleaned.isBlank()) {
+            quickHint = "Type a split like \"Tanmay owes me 500\" first."
+        } else {
+            quickHint = null
+            keyboardController?.hide()
+            focusManager.clearFocus()
+            onQuickSendCommand(cleaned)
+        }
+    }
+
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
@@ -1373,12 +1415,73 @@ private fun QuickAddChooserSheet(
             modifier = Modifier
                 .fillMaxWidth()
                 .verticalScroll(rememberScrollState())
+                .imePadding()
                 .padding(horizontal = 20.dp)
                 .padding(bottom = 32.dp)
                 .testTag("quick_add_chooser_sheet"),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Text("Quick Actions", style = MaterialTheme.typography.titleLarge)
+
+            // Instant Quick Split Command Bar with responsive Send button inside the main menu
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedTextField(
+                    value = quickCommand,
+                    onValueChange = {
+                        quickCommand = it
+                        if (quickHint != null) quickHint = null
+                    },
+                    placeholder = {
+                        Text(
+                            text = "Quick split: \"Tanmay owes me 500\"",
+                            color = tokens.inkMuted
+                        )
+                    },
+                    singleLine = true,
+                    shape = RoundedCornerShape(16.dp),
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                    keyboardActions = KeyboardActions(onSend = { submitQuickCommand() }),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedContainerColor = tokens.elevatedSurface,
+                        unfocusedContainerColor = tokens.elevatedSurface,
+                        focusedBorderColor = if (tokens.isDark) tokens.acidLime else tokens.obsidian,
+                        unfocusedBorderColor = tokens.hairline
+                    ),
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("quick_menu_command_input")
+                )
+                SpringButton(
+                    onClick = submitQuickCommand,
+                    shape = RoundedCornerShape(16.dp),
+                    contentPadding = PaddingValues(0.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (quickCommand.isNotBlank()) tokens.acidLime else tokens.elevatedSurface,
+                        contentColor = if (quickCommand.isNotBlank()) tokens.onAcidLime else tokens.inkMuted
+                    ),
+                    border = if (quickCommand.isNotBlank()) null else BorderStroke(1.dp, tokens.hairline),
+                    modifier = Modifier
+                        .size(54.dp)
+                        .testTag("quick_menu_send_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Rounded.Send,
+                        contentDescription = "Send quick split command",
+                        modifier = Modifier.size(21.dp)
+                    )
+                }
+            }
+            if (quickHint != null) {
+                Text(
+                    text = quickHint.orEmpty(),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = tokens.warning
+                )
+            }
 
             QuickAddOptionCard(
                 title = "Create New Group",

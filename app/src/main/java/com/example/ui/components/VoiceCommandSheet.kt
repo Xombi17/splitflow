@@ -101,6 +101,8 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.style.TextOverflow
+import com.example.ai.ActiveEngineKind
 import com.example.ai.LocalAiEngineState
 import com.example.ai.LocalModelPhase
 import com.example.ai.VoiceAudioRecorder
@@ -129,7 +131,7 @@ fun VoiceCommandSheet(
     initialGroupId: String?,
     onInstallWhistle: () -> Unit,
     onProcessAudio: (wavBytes: ByteArray, targetGroupId: String?, autoApply: Boolean) -> Unit,
-    onParseCommand: (transcript: String, targetGroupId: String?, autoApply: Boolean) -> Unit,
+    onParseCommand: (transcript: String, targetGroupId: String?, autoApply: Boolean, fromDeviceSpeechFallback: Boolean) -> Unit,
     onCommitPending: (result: VoiceExecutionResult, overrideTitle: String?, overrideGroupId: String?) -> Unit,
     onUndoApplied: (result: VoiceExecutionResult) -> Unit,
     onNavigateToActivity: () -> Unit,
@@ -222,7 +224,7 @@ fun VoiceCommandSheet(
             }
             keyboardController?.hide()
             focusManager.clearFocus()
-            onParseCommand(cleaned, selectedGroupId, autoApplyToLedger)
+            onParseCommand(cleaned, selectedGroupId, autoApplyToLedger, false)
             uiScope.launch { scrollState.animateScrollTo(0) }
         }
     }
@@ -270,7 +272,7 @@ fun VoiceCommandSheet(
                     val heard = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.trim()
                     if (!heard.isNullOrBlank()) {
                         typedCommand = heard
-                        onParseCommand(heard, selectedGroupId, autoApplyToLedger)
+                        onParseCommand(heard, selectedGroupId, autoApplyToLedger, true)
                     } else {
                         micNotice = "Heard nothing clearly — try speaking again or type below."
                     }
@@ -331,7 +333,7 @@ fun VoiceCommandSheet(
         } else if (isLiveSpeechListening) {
             stopLiveSpeech()
             if (typedCommand.isNotBlank()) {
-                onParseCommand(typedCommand.trim(), selectedGroupId, autoApplyToLedger)
+                onParseCommand(typedCommand.trim(), selectedGroupId, autoApplyToLedger, true)
             }
         }
     }
@@ -497,83 +499,162 @@ fun VoiceCommandSheet(
                 }
             }
 
-            // Cactus Whistle Local Model Control Strip
+            // Cactus Whistle Local Model Control Strip + Live Engine Status Badge + Visible Error
             Surface(
                 shape = RoundedCornerShape(16.dp),
                 color = tokens.elevatedSurface,
                 border = BorderStroke(
                     1.dp,
-                    if (localAiState.isWhistleReady) tokens.positive.copy(alpha = 0.45f) else tokens.hairline
+                    when {
+                        localAiState.whistleError != null -> tokens.negative.copy(alpha = 0.45f)
+                        localAiState.isWhistleReady -> tokens.positive.copy(alpha = 0.45f)
+                        else -> tokens.hairline
+                    }
                 ),
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Row(
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 12.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Memory,
-                        contentDescription = null,
-                        tint = if (localAiState.isWhistleReady) tokens.positive else tokens.acidLime,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = if (localAiState.isWhistleReady) {
-                                "Cactus ${localAiState.whistleActiveSlug ?: "Whistle"} · Ready"
-                            } else {
-                                "On-Device Speech Engine"
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Memory,
+                            contentDescription = null,
+                            tint = when {
+                                localAiState.whistleError != null -> tokens.negative
+                                localAiState.isWhistleReady -> tokens.positive
+                                else -> tokens.acidLime
                             },
-                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
-                            color = MaterialTheme.colorScheme.onSurface
+                            modifier = Modifier.size(18.dp)
                         )
-                        Text(
-                            text = localAiState.whistleNote,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = tokens.inkMuted
-                        )
-                    }
-                    when (localAiState.whistlePhase) {
-                        LocalModelPhase.READY -> {
-                            Surface(
-                                shape = RoundedCornerShape(999.dp),
-                                color = tokens.positiveContainer
-                            ) {
-                                Text(
-                                    text = "LOCAL",
-                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
-                                    color = tokens.positive,
-                                    modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp)
-                                )
-                            }
-                        }
-                        LocalModelPhase.DOWNLOADING -> {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(20.dp),
-                                strokeWidth = 2.dp,
-                                color = tokens.acidLime
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = if (localAiState.isWhistleReady) {
+                                    "Cactus ${localAiState.whistleActiveSlug ?: "Whistle"} · Ready"
+                                } else {
+                                    "On-Device Speech Engine"
+                                },
+                                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Text(
+                                text = localAiState.whistleNote,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = tokens.inkMuted
                             )
                         }
-                        LocalModelPhase.NOT_DOWNLOADED, LocalModelPhase.UNAVAILABLE -> {
-                            SpringButton(
-                                onClick = onInstallWhistle,
-                                shape = RoundedCornerShape(999.dp),
-                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = tokens.obsidian,
-                                    contentColor = tokens.onObsidian
-                                ),
-                                modifier = Modifier
-                                    .heightIn(min = 36.dp)
-                                    .testTag("install_whistle_button")
-                            ) {
-                                Icon(Icons.Rounded.Download, contentDescription = null, modifier = Modifier.size(14.dp))
-                                Spacer(Modifier.width(4.dp))
-                                Text("Whistle", style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold))
+                        when (localAiState.whistlePhase) {
+                            LocalModelPhase.READY -> {
+                                Surface(
+                                    shape = RoundedCornerShape(999.dp),
+                                    color = tokens.positiveContainer
+                                ) {
+                                    Text(
+                                        text = "CACTUS",
+                                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                        color = tokens.positive,
+                                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp)
+                                    )
+                                }
                             }
+                            LocalModelPhase.DOWNLOADING -> {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(20.dp),
+                                    strokeWidth = 2.dp,
+                                    color = tokens.acidLime
+                                )
+                            }
+                            LocalModelPhase.NOT_DOWNLOADED, LocalModelPhase.UNAVAILABLE -> {
+                                SpringButton(
+                                    onClick = onInstallWhistle,
+                                    shape = RoundedCornerShape(999.dp),
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = tokens.obsidian,
+                                        contentColor = tokens.onObsidian
+                                    ),
+                                    modifier = Modifier
+                                        .heightIn(min = 36.dp)
+                                        .testTag("install_whistle_button")
+                                ) {
+                                    Icon(Icons.Rounded.Download, contentDescription = null, modifier = Modifier.size(14.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text(
+                                        text = if (localAiState.whistlePhase == LocalModelPhase.UNAVAILABLE) "Retry" else "Whistle",
+                                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold)
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    // Live Engine Status Badge (shows which engine actually ran on the latest voice/text command)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("voice_live_engine_badge"),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        val pillBg = when (localAiState.lastVoiceEngineKind) {
+                            ActiveEngineKind.CACTUS_PRIMARY -> tokens.positiveContainer
+                            ActiveEngineKind.LOCAL_FALLBACK -> tokens.warningContainer
+                            else -> tokens.cardSurface
+                        }
+                        val pillInk = when (localAiState.lastVoiceEngineKind) {
+                            ActiveEngineKind.CACTUS_PRIMARY -> tokens.positive
+                            ActiveEngineKind.LOCAL_FALLBACK -> tokens.warning
+                            else -> tokens.inkMuted
+                        }
+                        Surface(
+                            shape = RoundedCornerShape(999.dp),
+                            color = pillBg,
+                            border = BorderStroke(1.dp, pillInk.copy(alpha = 0.35f))
+                        ) {
+                            Text(
+                                text = localAiState.lastVoiceEngineLabel?.let { "Last run: $it" }
+                                    ?: if (localAiState.isWhistleReady) "Engine ready: Cactus Whistle"
+                                    else "Active fallback: Android SpeechRecognizer",
+                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                color = pillInk,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                            )
+                        }
+                        localAiState.lastVoiceDetail?.let { detail ->
+                            Text(
+                                text = detail,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = tokens.inkMuted,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
+
+                    // Visible Cactus Download / Init / Transcribe Error Box
+                    localAiState.whistleError?.let { errText ->
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = tokens.negativeContainer,
+                            border = BorderStroke(1.dp, tokens.negative.copy(alpha = 0.35f)),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("whistle_error_banner")
+                        ) {
+                            Text(
+                                text = "Whistle error: $errText",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = tokens.negative,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp)
+                            )
                         }
                     }
                 }
@@ -1215,7 +1296,7 @@ fun VoiceCommandSheet(
                                 .clip(RoundedCornerShape(14.dp))
                                 .springClickable(pressedScale = 0.975f) {
                                     typedCommand = sample
-                                    onParseCommand(sample, selectedGroupId, autoApplyToLedger)
+                                    onParseCommand(sample, selectedGroupId, autoApplyToLedger, false)
                                 }
                                 .testTag("voice_example_chip_$idx")
                         ) {

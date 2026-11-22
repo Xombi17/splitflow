@@ -51,16 +51,21 @@ jobs:
           STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
+          KEYSTORE_DEST="$RUNNER_TEMP/splitflow-upload.jks"
           if [ -n "$KEYSTORE_BASE64" ]; then
-            printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/splitflow-upload.jks"
-            echo "KEYSTORE_PATH=$RUNNER_TEMP/splitflow-upload.jks" >> "$GITHUB_ENV"
+            printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_DEST"
+            echo "KEYSTORE_PATH=$KEYSTORE_DEST" >> "$GITHUB_ENV"
             echo "STORE_PASSWORD=$STORE_PASSWORD" >> "$GITHUB_ENV"
             echo "KEY_PASSWORD=$KEY_PASSWORD" >> "$GITHUB_ENV"
+          elif [ -f .github/splitflow-permanent-keystore.b64 ]; then
+            base64 --decode .github/splitflow-permanent-keystore.b64 > "$KEYSTORE_DEST"
+            echo "KEYSTORE_PATH=$KEYSTORE_DEST" >> "$GITHUB_ENV"
+            echo "STORE_PASSWORD=splitflow-permanent-key-2026" >> "$GITHUB_ENV"
+            echo "KEY_PASSWORD=splitflow-permanent-key-2026" >> "$GITHUB_ENV"
           else
-            CI_KEYSTORE="$RUNNER_TEMP/splitflow-upload.jks"
             CI_PASSWORD="splitflow-ci-release"
             keytool -genkeypair -v \
-              -keystore "$CI_KEYSTORE" \
+              -keystore "$KEYSTORE_DEST" \
               -storepass "$CI_PASSWORD" \
               -keypass "$CI_PASSWORD" \
               -alias upload \
@@ -68,7 +73,7 @@ jobs:
               -keysize 2048 \
               -validity 10000 \
               -dname "CN=SplitFlow,OU=CI,O=SplitFlow,L=Unknown,ST=Unknown,C=US" >/dev/null 2>&1
-            echo "KEYSTORE_PATH=$CI_KEYSTORE" >> "$GITHUB_ENV"
+            echo "KEYSTORE_PATH=$KEYSTORE_DEST" >> "$GITHUB_ENV"
             echo "STORE_PASSWORD=$CI_PASSWORD" >> "$GITHUB_ENV"
             echo "KEY_PASSWORD=$CI_PASSWORD" >> "$GITHUB_ENV"
           fi

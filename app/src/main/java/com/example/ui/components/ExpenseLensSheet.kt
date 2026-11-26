@@ -77,9 +77,8 @@ import androidx.compose.material.icons.rounded.Memory
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.foundation.layout.heightIn
 import com.example.R
-import com.example.ai.ActiveEngineKind
-import com.example.ai.LocalAiEngineState
-import com.example.ai.LocalModelPhase
+import com.example.ai.AiRouterStatus
+import com.example.ai.EngineTier
 import com.example.data.ReceiptPhotoStore
 import com.example.engine.FinanceEngine
 import com.example.model.AsyncUiState
@@ -102,10 +101,9 @@ import java.util.UUID
 fun ExpenseLensSheet(
     snapshot: LedgerSnapshot,
     lensState: AsyncUiState<ParsedReceipt>,
-    localAiState: LocalAiEngineState,
+    aiRouterStatus: AiRouterStatus,
     initialGroupId: String?,
-    onAnalyzeBitmap: (Bitmap) -> Unit,
-    onInstallMirage: (preferredSlug: String?) -> Unit,
+    onAnalyzeBitmap: (Bitmap, Boolean) -> Unit,
     onResetLens: () -> Unit,
     onSaveExpense: (ExpenseRecord) -> Unit,
     onDismiss: () -> Unit
@@ -142,7 +140,7 @@ fun ExpenseLensSheet(
     ) { bmp ->
         if (bmp != null) {
             previewBitmap = bmp
-            onAnalyzeBitmap(bmp)
+            onAnalyzeBitmap(bmp, false)
         }
     }
 
@@ -163,7 +161,7 @@ fun ExpenseLensSheet(
             }.getOrNull()
             if (loaded != null) {
                 previewBitmap = loaded
-                onAnalyzeBitmap(loaded)
+                onAnalyzeBitmap(loaded, false)
             }
         }
     }
@@ -287,22 +285,15 @@ fun ExpenseLensSheet(
                             }
                         }
                     } else {
-                        AiBadge(label = if (localAiState.isMirageReady) "Cactus Mirage" else "Local OCR")
+                        AiBadge(label = "ML Kit + Gemini")
                     }
                 }
 
-                // Cactus Mirage On-Device OCR Control Strip + Live Engine Badge + Visible Error
+                // Hybrid Edge ML Kit + Gemini Vision Status Strip
                 Surface(
                     shape = RoundedCornerShape(16.dp),
                     color = tokens.elevatedSurface,
-                    border = BorderStroke(
-                        1.dp,
-                        when {
-                            localAiState.mirageError != null -> tokens.negative.copy(alpha = 0.45f)
-                            localAiState.isMirageReady -> tokens.positive.copy(alpha = 0.45f)
-                            else -> tokens.hairline
-                        }
-                    ),
+                    border = BorderStroke(1.dp, tokens.hairline),
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Column(
@@ -316,139 +307,50 @@ fun ExpenseLensSheet(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
+                            val badgeColor = when (aiRouterStatus.lastOcrTier) {
+                                EngineTier.ON_DEVICE_EDGE -> tokens.positive
+                                EngineTier.BYOK_ROUND_ROBIN, EngineTier.FIREBASE_GEMINI_PRIMARY -> tokens.aiAccent
+                                EngineTier.FIREBASE_GEMINI_LITE -> tokens.warning
+                            }
                             Icon(
-                                imageVector = Icons.Rounded.Memory,
+                                imageVector = Icons.Rounded.AutoAwesome,
                                 contentDescription = null,
-                                tint = when {
-                                    localAiState.mirageError != null -> tokens.negative
-                                    localAiState.isMirageReady -> tokens.positive
-                                    else -> tokens.acidLime
-                                },
+                                tint = badgeColor,
                                 modifier = Modifier.size(18.dp)
                             )
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
-                                    text = if (localAiState.isMirageReady) {
-                                        "Cactus Mirage OCR · Ready"
-                                    } else {
-                                        "Cactus Mirage Receipt OCR"
-                                    },
+                                    text = aiRouterStatus.lastOcrEngineLabel,
                                     style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
                                     color = MaterialTheme.colorScheme.onSurface
                                 )
                                 Text(
-                                    text = localAiState.mirageNote,
+                                    text = aiRouterStatus.lastOcrDetail,
                                     style = MaterialTheme.typography.bodySmall,
-                                    color = tokens.inkMuted
+                                    color = tokens.inkMuted,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                             }
-                            when (localAiState.miragePhase) {
-                                LocalModelPhase.READY -> {
-                                    Surface(
-                                        shape = RoundedCornerShape(999.dp),
-                                        color = tokens.positiveContainer
-                                    ) {
-                                        Text(
-                                            text = "MIRAGE",
-                                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
-                                            color = tokens.positive,
-                                            modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp)
-                                        )
-                                    }
-                                }
-                                LocalModelPhase.DOWNLOADING -> {
-                                    CircularProgressIndicator(
-                                        modifier = Modifier.size(20.dp),
-                                        strokeWidth = 2.dp,
-                                        color = tokens.acidLime
+                            previewBitmap?.let { bmp ->
+                                SpringButton(
+                                    onClick = { onAnalyzeBitmap(bmp, true) },
+                                    enabled = lensState !is AsyncUiState.Loading,
+                                    shape = RoundedCornerShape(999.dp),
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = tokens.obsidian,
+                                        contentColor = tokens.onObsidian
+                                    ),
+                                    modifier = Modifier
+                                        .heightIn(min = 36.dp)
+                                        .testTag("lens_cloud_ai_enhance_button")
+                                ) {
+                                    Text(
+                                        text = "Cloud AI Enhance",
+                                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold)
                                     )
                                 }
-                                LocalModelPhase.NOT_DOWNLOADED, LocalModelPhase.UNAVAILABLE -> {
-                                    SpringButton(
-                                        onClick = { onInstallMirage(null) },
-                                        shape = RoundedCornerShape(999.dp),
-                                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                                        colors = ButtonDefaults.buttonColors(
-                                            containerColor = tokens.obsidian,
-                                            contentColor = tokens.onObsidian
-                                        ),
-                                        modifier = Modifier
-                                            .heightIn(min = 36.dp)
-                                            .testTag("install_mirage_button")
-                                    ) {
-                                        Icon(Icons.Rounded.Download, contentDescription = null, modifier = Modifier.size(14.dp))
-                                        Spacer(Modifier.width(4.dp))
-                                        Text(
-                                            text = if (localAiState.miragePhase == LocalModelPhase.UNAVAILABLE) "Retry" else "Get Mirage",
-                                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold)
-                                        )
-                                    }
-                                }
-                            }
-                        }
-
-                        // Live Engine Run Status Badge (shows which OCR engine actually ran)
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("ocr_live_engine_badge"),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            val isPrimary = localAiState.lastOcrEngineKind == ActiveEngineKind.CACTUS_PRIMARY
-                            val isFallback = localAiState.lastOcrEngineKind == ActiveEngineKind.LOCAL_FALLBACK
-                            val pillBg = when {
-                                isPrimary -> tokens.positiveContainer
-                                isFallback -> tokens.warningContainer
-                                else -> tokens.cardSurface
-                            }
-                            val pillInk = when {
-                                isPrimary -> tokens.positive
-                                isFallback -> tokens.warning
-                                else -> tokens.inkMuted
-                            }
-                            Surface(
-                                shape = RoundedCornerShape(999.dp),
-                                color = pillBg,
-                                border = BorderStroke(1.dp, pillInk.copy(alpha = 0.35f))
-                            ) {
-                                Text(
-                                    text = localAiState.lastOcrEngineLabel?.let { "Last scan: $it" }
-                                        ?: if (localAiState.isMirageReady) "Engine ready: Cactus Mirage"
-                                        else "Active fallback: ML Kit On-Device OCR",
-                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
-                                    color = pillInk,
-                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
-                                )
-                            }
-                            localAiState.lastOcrDetail?.let { detail ->
-                                Text(
-                                    text = detail,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = tokens.inkMuted,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    modifier = Modifier.weight(1f)
-                                )
-                            }
-                        }
-
-                        // Visible Cactus Download / Init Error Detail
-                        localAiState.mirageError?.let { errText ->
-                            Surface(
-                                shape = RoundedCornerShape(10.dp),
-                                color = tokens.negativeContainer,
-                                border = BorderStroke(1.dp, tokens.negative.copy(alpha = 0.35f)),
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .testTag("mirage_error_banner")
-                            ) {
-                                Text(
-                                    text = "Mirage init/OCR error: $errText",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = tokens.negative,
-                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp)
-                                )
                             }
                         }
                     }

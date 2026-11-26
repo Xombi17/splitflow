@@ -83,7 +83,7 @@ fun AuthScreen(
     val isGoogleConfigured = remember {
         try {
             val id = context.getString(R.string.default_web_client_id)
-            id.isNotBlank() && id != "splitflow-google-sign-in-not-configured"
+            id.isNotBlank()
         } catch (_: Exception) {
             false
         }
@@ -195,7 +195,7 @@ fun AuthScreen(
                             contentScale = ContentScale.Crop
                         )
                         AiBadge(
-                            label = "CACTUS ON-DEVICE VOICE & OCR",
+                            label = "MULTILINGUAL VOICE & GEMINI AI",
                             modifier = Modifier
                                 .align(Alignment.TopStart)
                                 .padding(12.dp)

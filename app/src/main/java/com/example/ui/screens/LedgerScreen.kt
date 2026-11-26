@@ -44,6 +44,7 @@ import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.ShoppingBag
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material.icons.rounded.Verified
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -54,12 +55,14 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.SwipeToDismissBox
 import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.rememberSwipeToDismissBoxState
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -84,6 +87,7 @@ import com.example.data.ReceiptPhotoStore
 import com.example.engine.FinanceEngine
 import com.example.model.ExpenseCategory
 import com.example.model.ExpenseRecord
+import com.example.model.PaymentMethod
 import com.example.model.RecurringFrequency
 import com.example.model.SettlementRecord
 import com.example.ui.components.AiBadge
@@ -136,6 +140,8 @@ fun LedgerScreen(
     onViewSettlementProof: (SettlementRecord) -> Unit,
     onEditExpense: (ExpenseRecord) -> Unit,
     onDeleteExpense: (ExpenseRecord) -> Unit,
+    onUpdateSettlement: (SettlementRecord) -> Unit,
+    onDeleteSettlement: (SettlementRecord) -> Unit,
     onToggleSettled: (ExpenseRecord) -> Unit,
     onLogRecurringCycle: (ExpenseRecord) -> Unit,
     modifier: Modifier = Modifier
@@ -152,6 +158,7 @@ fun LedgerScreen(
     var selectedGroupFilterId by remember { mutableStateOf<String?>(null) }
     var selectedCategoryFilter by remember { mutableStateOf<ExpenseCategory?>(null) }
     var showFilterSheet by remember { mutableStateOf(false) }
+    var editingSettlement by remember { mutableStateOf<SettlementRecord?>(null) }
 
     val activeFilterCount = (if (selectedStatus != StatusFilter.ALL) 1 else 0) +
         (if (selectedGroupFilterId != null) 1 else 0) +
@@ -773,16 +780,39 @@ fun LedgerScreen(
                                                 style = TabularAmountStyle.copy(fontWeight = FontWeight.Bold),
                                                 color = MaterialTheme.colorScheme.onSurface
                                             )
-                                            SpringIconButton(
-                                                onClick = { onEditExpense(exp) },
-                                                modifier = Modifier.size(26.dp)
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(2.dp)
                                             ) {
-                                                Icon(
-                                                    imageVector = Icons.Rounded.Edit,
-                                                    contentDescription = "Edit expense",
-                                                    tint = tokens.inkMuted,
-                                                    modifier = Modifier.size(14.dp)
-                                                )
+                                                SpringIconButton(
+                                                    onClick = { onEditExpense(exp) },
+                                                    modifier = Modifier
+                                                        .size(34.dp)
+                                                        .testTag("edit_expense_${exp.id}")
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Rounded.Edit,
+                                                        contentDescription = "Edit ${exp.title}",
+                                                        tint = tokens.inkMuted,
+                                                        modifier = Modifier.size(16.dp)
+                                                    )
+                                                }
+                                                SpringIconButton(
+                                                    onClick = {
+                                                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                                        onDeleteExpense(exp)
+                                                    },
+                                                    modifier = Modifier
+                                                        .size(34.dp)
+                                                        .testTag("delete_expense_${exp.id}")
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Rounded.DeleteOutline,
+                                                        contentDescription = "Delete ${exp.title}",
+                                                        tint = tokens.negative,
+                                                        modifier = Modifier.size(16.dp)
+                                                    )
+                                                }
                                             }
                                         }
                                     }
@@ -817,65 +847,145 @@ fun LedgerScreen(
                         snapshot.settlements.forEachIndexed { idx, settlement ->
                             val from = memberMap[settlement.fromMemberId]?.name ?: "Member"
                             val to = memberMap[settlement.toMemberId]?.name ?: "Member"
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 16.dp, vertical = 14.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = "$from paid $to",
-                                        style = MaterialTheme.typography.titleSmall.copy(
-                                            fontWeight = FontWeight.SemiBold
-                                        )
-                                    )
-                                    Text(
-                                        text = "${settlement.paymentMethodEnum.label} · ${formatShortDateLabel(settlement.dateLabel)}" +
-                                            (settlement.note?.let { " · $it" } ?: ""),
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = tokens.inkMuted
-                                    )
+                            val settleDismissState = rememberSwipeToDismissBoxState(
+                                confirmValueChange = { value ->
+                                    if (value == SwipeToDismissBoxValue.EndToStart) {
+                                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                        onDeleteSettlement(settlement)
+                                        true
+                                    } else false
                                 }
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    if (!settlement.paymentProofPath.isNullOrBlank()) {
-                                        SpringSurface(
-                                            onClick = { onViewSettlementProof(settlement) },
-                                            shape = RoundedCornerShape(999.dp),
-                                            color = tokens.positiveContainer,
-                                            modifier = Modifier.testTag("view_settlement_proof_${settlement.id}")
+                            )
+                            SwipeToDismissBox(
+                                state = settleDismissState,
+                                enableDismissFromStartToEnd = false,
+                                backgroundContent = {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .background(tokens.negativeContainer)
+                                            .padding(horizontal = 20.dp),
+                                        contentAlignment = Alignment.CenterEnd
+                                    ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                                         ) {
-                                            Row(
-                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                                                verticalAlignment = Alignment.CenterVertically,
-                                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                            Icon(
+                                                imageVector = Icons.Rounded.DeleteOutline,
+                                                contentDescription = null,
+                                                tint = tokens.negative
+                                            )
+                                            Text(
+                                                text = "Delete",
+                                                style = MaterialTheme.typography.labelLarge,
+                                                color = tokens.negative
+                                            )
+                                        }
+                                    }
+                                }
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .background(tokens.cardSurface)
+                                        .padding(horizontal = 16.dp, vertical = 14.dp)
+                                        .testTag("ledger_settlement_${settlement.id}"),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = "$from paid $to",
+                                            style = MaterialTheme.typography.titleSmall.copy(
+                                                fontWeight = FontWeight.SemiBold
+                                            )
+                                        )
+                                        Text(
+                                            text = "${settlement.paymentMethodEnum.label} · ${formatShortDateLabel(settlement.dateLabel)}" +
+                                                (settlement.note?.let { " · $it" } ?: ""),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = tokens.inkMuted
+                                        )
+                                    }
+                                    Column(
+                                        horizontalAlignment = Alignment.End,
+                                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                        ) {
+                                            if (!settlement.paymentProofPath.isNullOrBlank()) {
+                                                SpringSurface(
+                                                    onClick = { onViewSettlementProof(settlement) },
+                                                    shape = RoundedCornerShape(999.dp),
+                                                    color = tokens.positiveContainer,
+                                                    modifier = Modifier.testTag("view_settlement_proof_${settlement.id}")
+                                                ) {
+                                                    Row(
+                                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                                        verticalAlignment = Alignment.CenterVertically,
+                                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                                    ) {
+                                                        Icon(
+                                                            imageVector = Icons.Rounded.Verified,
+                                                            contentDescription = "View payment proof",
+                                                            tint = tokens.positive,
+                                                            modifier = Modifier.size(13.dp)
+                                                        )
+                                                        Text(
+                                                            text = "Proof",
+                                                            style = MaterialTheme.typography.labelSmall.copy(
+                                                                fontWeight = FontWeight.Bold
+                                                            ),
+                                                            color = tokens.positive
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                            TabularCurrencyText(
+                                                minorUnits = settlement.amountMinorUnits,
+                                                currency = settlement.currencyEnum,
+                                                style = TabularAmountStyle.copy(fontWeight = FontWeight.Bold),
+                                                color = tokens.positive
+                                            )
+                                        }
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(2.dp)
+                                        ) {
+                                            SpringIconButton(
+                                                onClick = { editingSettlement = settlement },
+                                                modifier = Modifier
+                                                    .size(34.dp)
+                                                    .testTag("edit_settlement_${settlement.id}")
                                             ) {
                                                 Icon(
-                                                    imageVector = Icons.Rounded.Verified,
-                                                    contentDescription = "View payment proof",
-                                                    tint = tokens.positive,
-                                                    modifier = Modifier.size(13.dp)
+                                                    imageVector = Icons.Rounded.Edit,
+                                                    contentDescription = "Edit settlement",
+                                                    tint = tokens.inkMuted,
+                                                    modifier = Modifier.size(16.dp)
                                                 )
-                                                Text(
-                                                    text = "Proof",
-                                                    style = MaterialTheme.typography.labelSmall.copy(
-                                                        fontWeight = FontWeight.Bold
-                                                    ),
-                                                    color = tokens.positive
+                                            }
+                                            SpringIconButton(
+                                                onClick = {
+                                                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                                    onDeleteSettlement(settlement)
+                                                },
+                                                modifier = Modifier
+                                                    .size(34.dp)
+                                                    .testTag("delete_settlement_${settlement.id}")
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Rounded.DeleteOutline,
+                                                    contentDescription = "Delete settlement",
+                                                    tint = tokens.negative,
+                                                    modifier = Modifier.size(16.dp)
                                                 )
                                             }
                                         }
                                     }
-                                    TabularCurrencyText(
-                                        minorUnits = settlement.amountMinorUnits,
-                                        currency = settlement.currencyEnum,
-                                        style = TabularAmountStyle.copy(fontWeight = FontWeight.Bold),
-                                        color = tokens.positive
-                                    )
                                 }
                             }
                             if (idx < snapshot.settlements.lastIndex) {
@@ -1004,6 +1114,143 @@ fun LedgerScreen(
                         )
                     ) {
                         Text("Apply", fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
+    }
+
+    // Edit Settlement ModalBottomSheet
+    val targetSettlement = editingSettlement
+    if (targetSettlement != null) {
+        var amountInput by remember(targetSettlement.id) {
+            mutableStateOf(FinanceEngine.minorToMajorInput(targetSettlement.amountMinorUnits))
+        }
+        var method by remember(targetSettlement.id) {
+            mutableStateOf(targetSettlement.paymentMethodEnum)
+        }
+        var dateInput by remember(targetSettlement.id) {
+            mutableStateOf(targetSettlement.dateLabel)
+        }
+        var noteInput by remember(targetSettlement.id) {
+            mutableStateOf(targetSettlement.note.orEmpty())
+        }
+        val fromName = memberMap[targetSettlement.fromMemberId]?.name ?: "Member"
+        val toName = memberMap[targetSettlement.toMemberId]?.name ?: "Member"
+        val parsedAmountMinor = FinanceEngine.parseMajorToMinor(amountInput)
+
+        ModalBottomSheet(
+            onDismissRequest = { editingSettlement = null },
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+            containerColor = MaterialTheme.colorScheme.background,
+            shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp)
+                    .padding(bottom = 28.dp)
+                    .testTag("edit_settlement_sheet"),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column {
+                        Text(
+                            text = "Edit Settlement",
+                            style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold)
+                        )
+                        Text(
+                            text = "$fromName paid $toName",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = tokens.inkMuted
+                        )
+                    }
+                    SpringIconButton(onClick = { editingSettlement = null }) {
+                        Icon(Icons.Rounded.Close, contentDescription = "Close edit settlement")
+                    }
+                }
+
+                OutlinedTextField(
+                    value = amountInput,
+                    onValueChange = { amountInput = it },
+                    label = { Text("Amount (${targetSettlement.currencyEnum.symbol})") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    singleLine = true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("edit_settlement_amount_input")
+                )
+
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("Payment Method", style = MaterialTheme.typography.labelMedium, color = tokens.inkMuted)
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        PaymentMethod.entries.forEach { pm ->
+                            FilterChip(
+                                selected = method == pm,
+                                onClick = { method = pm },
+                                label = { Text(pm.label) }
+                            )
+                        }
+                    }
+                }
+
+                OutlinedTextField(
+                    value = dateInput,
+                    onValueChange = { dateInput = it },
+                    label = { Text("Date (YYYY-MM-DD)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                OutlinedTextField(
+                    value = noteInput,
+                    onValueChange = { noteInput = it },
+                    label = { Text("Note (optional)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = {
+                            onDeleteSettlement(targetSettlement)
+                            editingSettlement = null
+                        },
+                        border = BorderStroke(1.dp, tokens.negative.copy(alpha = 0.5f)),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = tokens.negative),
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp)
+                            .testTag("delete_settlement_in_sheet_button")
+                    ) {
+                        Text("Delete")
+                    }
+                    Button(
+                        onClick = {
+                            onUpdateSettlement(
+                                targetSettlement.copy(
+                                    amountMinorUnits = parsedAmountMinor,
+                                    paymentMethod = method.name,
+                                    dateLabel = dateInput.trim().ifBlank { targetSettlement.dateLabel },
+                                    note = noteInput.trim().takeIf { it.isNotEmpty() }
+                                )
+                            )
+                            editingSettlement = null
+                        },
+                        enabled = parsedAmountMinor > 0L,
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp)
+                            .testTag("save_settlement_edit_button")
+                    ) {
+                        Text("Save Changes")
                     }
                 }
             }

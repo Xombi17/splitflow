@@ -7,14 +7,15 @@ import com.example.model.ExpenseCategory
 import com.example.model.LineItemTag
 import com.example.model.ParsedReceipt
 import com.example.model.ReceiptLineItem
+import com.google.firebase.ai.type.Schema
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
-import java.io.File
-import java.io.FileOutputStream
+import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -24,58 +25,237 @@ import kotlin.math.abs
 import kotlin.math.roundToLong
 
 /**
- * 100% on-device Receipt OCR pipeline:
- * 1. Primary: Cactus Mirage tiny vision/OCR model (when installed on supported ARM64 devices).
- * 2. Instant Local Fallback: On-device ML Kit Text Recognition with spatial Y-row alignment.
- * 3. Deterministic receipt structurer for merchant, items, diet tags, tax, service charge, and total.
+ * Two-tier Receipt OCR pipeline:
+ * 1. Tier 1 (Instant On-Device): ML Kit Text Recognition with spatial Y-row alignment (~150-250ms).
+ * 2. Tier 2 (Cloud AI Fallback): MultiProviderAiRouter — Gemini 3.8 Flash -> Gemini 3.5 Flash-Lite
+ *    multimodal vision (or BYOK round-robin text structuring) when ML Kit yields messy/low-line text
+ *    or when the user explicitly requests Cloud AI refinement.
  */
 object LocalReceiptOcrEngine {
 
+    private val receiptJsonSchema: Schema by lazy {
+        Schema.obj(
+            properties = mapOf(
+                "merchantName" to Schema.string("Restaurant or store name"),
+                "date" to Schema.string("ISO date YYYY-MM-DD"),
+                "currency" to Schema.enumeration(listOf("INR", "USD", "EUR", "GBP", "THB")),
+                "category" to Schema.enumeration(
+                    listOf("FOOD", "TRAVEL", "STAY", "GROCERIES", "UTILITIES", "ENTERTAINMENT", "SHOPPING", "OTHER")
+                ),
+                "subtotal" to Schema.double("Subtotal in major currency units"),
+                "tax" to Schema.double("Total GST/VAT/tax in major currency units"),
+                "serviceCharge" to Schema.double("Service charge or tip in major currency units"),
+                "discount" to Schema.double("Discount amount in major currency units"),
+                "grandTotal" to Schema.double("Final payable total in major currency units"),
+                "lineItems" to Schema.array(
+                    items = Schema.obj(
+                        properties = mapOf(
+                            "name" to Schema.string("Item name"),
+                            "quantity" to Schema.integer("Quantity, default 1"),
+                            "totalPrice" to Schema.double("Line total in major currency units"),
+                            "tag" to Schema.enumeration(
+                                listOf("VEG", "NON_VEG", "BEER", "ALCOHOL", "MOCKTAIL", "DESSERT", "HOOKAH_EXTRA", "SHARED")
+                            )
+                        )
+                    ),
+                    description = "Individual priced line items on the receipt"
+                )
+            ),
+            optionalProperties = listOf("date", "subtotal", "tax", "serviceCharge", "discount")
+        )
+    }
+
     suspend fun analyzeReceiptBitmap(
         context: Context,
-        bitmap: Bitmap
+        bitmap: Bitmap,
+        router: MultiProviderAiRouter? = null,
+        preferCloudAi: Boolean = false
     ): ParsedReceipt = withContext(Dispatchers.IO) {
         val scaled = scaleBitmap(bitmap, maxDim = 1200)
 
-        // 1. Instant on-device ML Kit spatial OCR (executes in ~150-250ms with hardware acceleration)
+        // Tier 1: Instant on-device ML Kit spatial OCR (~150-250ms)
         val mlStartMs = System.currentTimeMillis()
         val mlLines = runCatching { runMlKitSpatialOcr(scaled) }.getOrDefault(emptyList())
         val mlElapsedMs = (System.currentTimeMillis() - mlStartMs).coerceAtLeast(1L)
 
-        // 2. If ML Kit extracted readable lines, use them immediately for instant receipt scan
-        val ocrLines = if (mlLines.size >= 2) {
-            CactusLocalModelManager.recordOcrEngineRun(
-                label = "ML Kit Spatial OCR (Instant)",
-                kind = ActiveEngineKind.CACTUS_PRIMARY,
-                detail = "Processed ${mlLines.size} lines in ${mlElapsedMs}ms"
+        val localParsed = if (mlLines.isNotEmpty()) {
+            runCatching { parseReceiptLines(mlLines) }.getOrNull()
+        } else null
+
+        val localLooksGood = localParsed != null &&
+            localParsed.lineItems.size >= 2 &&
+            localParsed.grandTotalMinor > 0L
+
+        if (!preferCloudAi && localLooksGood && localParsed != null) {
+            router?.recordOcrRun(
+                label = "ML Kit Spatial OCR",
+                tier = EngineTier.ON_DEVICE_EDGE,
+                detail = "Extracted ${localParsed.lineItems.size} items in ${mlElapsedMs}ms on-device"
             )
-            mlLines
-        } else {
-            // 3. Fallback to Cactus Mirage only if ML Kit found no lines on this image
-            val engineState = CactusLocalModelManager.state.value
-            val mirageLines = if (engineState.isMirageReady) {
-                val tempFile = writeTempJpeg(context, scaled)
-                try {
-                    kotlinx.coroutines.withTimeoutOrNull(6000L) {
-                        CactusLocalModelManager.extractReceiptTextWithMirage(context, tempFile)
-                            ?.lines()
-                            ?.map { it.trim() }
-                            ?.filter { it.isNotEmpty() }
-                    } ?: emptyList()
-                } finally {
-                    tempFile.delete()
+            return@withContext localParsed
+        }
+
+        // Tier 2: Cloud AI Fallback (Gemini 3.8 Flash -> 3.5 Flash-Lite multimodal, or BYOK structuring)
+        if (router != null && router.keyStore.routingStrategy.value != RoutingStrategy.ON_DEVICE_ONLY) {
+            try {
+                val cloudReceipt = analyzeWithCloudFallback(scaled, mlLines, router)
+                if (cloudReceipt != null) {
+                    return@withContext cloudReceipt
                 }
-            } else {
-                emptyList()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (localParsed != null) {
+                    router.recordOcrRun(
+                        label = "ML Kit Spatial OCR",
+                        tier = EngineTier.ON_DEVICE_EDGE,
+                        detail = "Extracted ${localParsed.lineItems.size} item(s) locally",
+                        notice = "Cloud fallback unavailable: ${e.localizedMessage?.take(80)}"
+                    )
+                    return@withContext localParsed
+                }
+                throw e
             }
-            if (mirageLines.isNotEmpty()) mirageLines else mlLines
         }
 
-        if (ocrLines.isEmpty()) {
-            throw IllegalStateException("No readable text found on this receipt image. Try a clearer photo.")
+        if (localParsed != null) {
+            router?.recordOcrRun(
+                label = "ML Kit Spatial OCR",
+                tier = EngineTier.ON_DEVICE_EDGE,
+                detail = "Processed ${mlLines.size} lines in ${mlElapsedMs}ms on-device"
+            )
+            return@withContext localParsed
         }
 
-        parseReceiptLines(ocrLines)
+        throw IllegalStateException("No readable prices found on this receipt. Try a clearer photo or tap Cloud AI Scan.")
+    }
+
+    private suspend fun analyzeWithCloudFallback(
+        bitmap: Bitmap,
+        mlLines: List<String>,
+        router: MultiProviderAiRouter
+    ): ParsedReceipt? {
+        val prompt = """
+            Extract this receipt accurately into JSON.
+            Return merchantName, date (YYYY-MM-DD), currency (INR/USD/EUR/GBP/THB), category, subtotal, tax (sum of CGST/SGST/GST/VAT), serviceCharge, discount, grandTotal, and lineItems (name, quantity, totalPrice, tag).
+            Classify food/drink tags: VEG, NON_VEG, BEER, ALCOHOL, MOCKTAIL, DESSERT, HOOKAH_EXTRA, or SHARED.
+            All prices must be numeric values in major currency units (e.g., 450.00).
+        """.trimIndent()
+
+        // If user prioritizes BYOK text keys and ML Kit read text lines, try BYOK round-robin structuring first
+        val strategy = router.keyStore.routingStrategy.value
+        val hasEnabledByok = router.keyStore.keys.value.any { it.enabled }
+        if (strategy == RoutingStrategy.BYOK_FIRST_THEN_FIREBASE && hasEnabledByok && mlLines.size >= 2) {
+            val byokRes = runCatching {
+                router.generateStructuredOrText(
+                    systemPrompt = "You are a strict receipt JSON parser. Return valid JSON only with keys: merchantName, date, currency, category, subtotal, tax, serviceCharge, discount, grandTotal, lineItems[{name,quantity,totalPrice,tag}].",
+                    userPrompt = "$prompt\n\nOCR LINES:\n${mlLines.joinToString("\n")}",
+                    expectJson = true,
+                    firebaseSchema = receiptJsonSchema
+                )
+            }.getOrNull()
+            if (byokRes != null) {
+                val parsed = runCatching { parseCloudReceiptJson(byokRes.text) }.getOrNull()
+                if (parsed != null) {
+                    router.recordOcrRun(
+                        label = byokRes.engineLabel,
+                        tier = byokRes.tier,
+                        detail = "Structured ${parsed.lineItems.size} items in ${byokRes.latencyMs}ms",
+                        notice = byokRes.fallbackNote
+                    )
+                    return parsed
+                }
+            }
+        }
+
+        // Multimodal vision fallback via Firebase AI Logic (gemini-3.8-flash -> gemini-3.5-flash-lite)
+        val visionRes = router.generateMultimodalJson(
+            bitmap = bitmap,
+            prompt = prompt,
+            schema = receiptJsonSchema
+        )
+        val parsed = parseCloudReceiptJson(visionRes.text)
+        router.recordOcrRun(
+            label = visionRes.engineLabel,
+            tier = visionRes.tier,
+            detail = "Vision extracted ${parsed.lineItems.size} items in ${visionRes.latencyMs}ms",
+            notice = visionRes.fallbackNote
+        )
+        return parsed
+    }
+
+    internal fun parseCloudReceiptJson(jsonString: String): ParsedReceipt {
+        val obj = JSONObject(jsonString)
+        val merchant = obj.optString("merchantName").trim().ifBlank { "Scanned Receipt" }
+        val dateIso = obj.optString("date").trim().takeIf { it.matches(Regex("\\d{4}-\\d{2}-\\d{2}")) }
+            ?: SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+        val currency = CurrencyCode.fromRaw(obj.optString("currency", "INR"))
+        val category = ExpenseCategory.fromRaw(obj.optString("category", "FOOD"))
+
+        val itemsArr = obj.optJSONArray("lineItems")
+        val items = mutableListOf<ReceiptLineItem>()
+        if (itemsArr != null) {
+            for (i in 0 until itemsArr.length()) {
+                val itemObj = itemsArr.optJSONObject(i) ?: continue
+                val name = itemObj.optString("name").trim()
+                val totalMajor = itemObj.optDouble("totalPrice", 0.0)
+                if (name.isBlank() || totalMajor <= 0.0) continue
+                val qty = itemObj.optLong("quantity", 1L).coerceIn(1L, 50L)
+                val totalMinor = (totalMajor * 100.0).roundToLong().coerceAtLeast(1L)
+                val unitMinor = if (qty > 1L) totalMinor / qty else totalMinor
+                val tag = LineItemTag.fromRaw(itemObj.optString("tag", "SHARED"))
+                items.add(
+                    ReceiptLineItem(
+                        itemId = "ai_ocr_${items.size + 1}",
+                        name = name,
+                        quantity = qty,
+                        unitPriceMinor = unitMinor,
+                        totalPriceMinor = totalMinor,
+                        assignedMemberIds = emptyList(),
+                        itemTag = tag.name
+                    )
+                )
+            }
+        }
+
+        val itemsSum = items.sumOf { it.totalPriceMinor }
+        val subtotalMinor = (obj.optDouble("subtotal", 0.0) * 100.0).roundToLong().let {
+            if (it > 0L) it else itemsSum
+        }
+        val taxMinor = (obj.optDouble("tax", 0.0) * 100.0).roundToLong().coerceAtLeast(0L)
+        val serviceMinor = (obj.optDouble("serviceCharge", 0.0) * 100.0).roundToLong().coerceAtLeast(0L)
+        val discountMinor = (obj.optDouble("discount", 0.0) * 100.0).roundToLong().coerceAtLeast(0L)
+        val grandTotalMinor = (obj.optDouble("grandTotal", 0.0) * 100.0).roundToLong().let {
+            if (it > 0L) it else (subtotalMinor + taxMinor + serviceMinor - discountMinor).coerceAtLeast(itemsSum)
+        }
+
+        if (items.isEmpty() && grandTotalMinor > 0L) {
+            items.add(
+                ReceiptLineItem(
+                    itemId = "ai_ocr_1",
+                    name = merchant,
+                    quantity = 1L,
+                    unitPriceMinor = grandTotalMinor,
+                    totalPriceMinor = grandTotalMinor,
+                    assignedMemberIds = emptyList(),
+                    itemTag = LineItemTag.SHARED.name
+                )
+            )
+        }
+        require(grandTotalMinor > 0L) { "Receipt JSON contained no valid total amount." }
+
+        return ParsedReceipt(
+            merchantName = merchant,
+            date = dateIso,
+            currency = currency,
+            category = category,
+            lineItems = items,
+            subtotalMinor = subtotalMinor.coerceAtLeast(itemsSum),
+            taxMinor = taxMinor,
+            serviceChargeMinor = serviceMinor,
+            discountMinor = discountMinor,
+            grandTotalMinor = grandTotalMinor
+        )
     }
 
     private suspend fun runMlKitSpatialOcr(bitmap: Bitmap): List<String> {
@@ -111,7 +291,6 @@ object LocalReceiptOcrEngine {
             return visionText.text.lines().map { it.trim() }.filter { it.isNotEmpty() }
         }
 
-        // Group text boxes that share the same horizontal receipt row (item name left, price right)
         val rows = mutableListOf<MutableList<PositionedLine>>()
         for (item in positioned) {
             val matchRow = rows.lastOrNull { row ->
@@ -155,8 +334,6 @@ object LocalReceiptOcrEngine {
         for (rawLine in lines) {
             val line = rawLine.trim()
             if (line.length < 3) continue
-            val lower = line.lowercase(Locale.US)
-
             val priceMatch = priceTailRegex.find(line) ?: continue
             val amountVal = priceMatch.groupValues[1].replace(",", "").toDoubleOrNull() ?: continue
             if (amountVal <= 0.0 || amountVal > 500_000.0) continue
@@ -333,7 +510,7 @@ object LocalReceiptOcrEngine {
         val l = name.lowercase(Locale.US)
         return when {
             listOf("beer", "pint", "pitcher", "lager", "ipa", "draught", "kingfisher", "heineken", "corona", "bira", "hoegaarden").any { l.contains(it) } -> LineItemTag.BEER
-            listOf("whisky", "whiskey", "vodka", "gin", "rum", "tequila", "wine", "cocktail", "negroni", "margarita", "martini", "shot", "peg", "LIIT", "mojito rum").any { l.contains(it.lowercase(Locale.US)) } -> LineItemTag.ALCOHOL
+            listOf("whisky", "whiskey", "vodka", "gin", "rum", "tequila", "wine", "cocktail", "negroni", "margarita", "martini", "shot", "peg", "liit", "mojito rum").any { l.contains(it) } -> LineItemTag.ALCOHOL
             listOf("mocktail", "virgin", "soda", "coke", "pepsi", "sprite", "lime", "juice", "coffee", "latte", "cappuccino", "tea", "chai", "shake", "water").any { l.contains(it) } -> LineItemTag.MOCKTAIL
             listOf("ice cream", "tiramisu", "cake", "brownie", "gulab", "dessert", "cheesecake", "pastry", "gelato").any { l.contains(it) } -> LineItemTag.DESSERT
             listOf("hookah", "shisha", "sheesha", "cover charge").any { l.contains(it) } -> LineItemTag.HOOKAH_EXTRA
@@ -354,13 +531,5 @@ object LocalReceiptOcrEngine {
             (h * scale).toInt().coerceAtLeast(1),
             true
         )
-    }
-
-    private fun writeTempJpeg(context: Context, bitmap: Bitmap): File {
-        val file = File(context.cacheDir, "mirage_ocr_${System.currentTimeMillis()}.jpg")
-        FileOutputStream(file).use { out ->
-            bitmap.compress(Bitmap.CompressFormat.JPEG, 90, out)
-        }
-        return file
     }
 }

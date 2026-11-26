@@ -68,7 +68,9 @@ interface LedgerRepository {
     suspend fun addExpense(userId: String, expense: ExpenseRecord, preferredId: String? = null): Result<String>
     suspend fun updateExpense(userId: String, expenseId: String, expense: ExpenseRecord): Result<Unit>
     suspend fun deleteExpense(userId: String, expenseId: String): Result<Unit>
-    suspend fun addSettlement(userId: String, settlement: SettlementRecord): Result<String>
+    suspend fun addSettlement(userId: String, settlement: SettlementRecord, preferredId: String? = null): Result<String>
+    suspend fun updateSettlement(userId: String, settlementId: String, settlement: SettlementRecord): Result<Unit>
+    suspend fun deleteSettlement(userId: String, settlementId: String): Result<Unit>
 }
 
 /**
@@ -438,12 +440,34 @@ class GuestLedgerRepository(
         return Result.success(Unit)
     }
 
-    override suspend fun addSettlement(userId: String, settlement: SettlementRecord): Result<String> {
-        val id = "set_${UUID.randomUUID().toString().take(8)}"
+    override suspend fun addSettlement(
+        userId: String,
+        settlement: SettlementRecord,
+        preferredId: String?
+    ): Result<String> {
+        val id = preferredId?.takeIf { it.isNotBlank() } ?: "set_${UUID.randomUUID().toString().take(8)}"
         val saved = settlement.copy(id = id, userId = userId)
-        _settlements.update { listOf(saved) + it }
+        _settlements.update { listOf(saved) + it.filterNot { existing -> existing.id == id } }
         persistToDisk()
         return Result.success(id)
+    }
+
+    override suspend fun updateSettlement(
+        userId: String,
+        settlementId: String,
+        settlement: SettlementRecord
+    ): Result<Unit> {
+        _settlements.update { list ->
+            list.map { s -> if (s.id == settlementId) settlement.copy(id = settlementId, userId = userId) else s }
+        }
+        persistToDisk()
+        return Result.success(Unit)
+    }
+
+    override suspend fun deleteSettlement(userId: String, settlementId: String): Result<Unit> {
+        _settlements.update { list -> list.filterNot { it.id == settlementId } }
+        persistToDisk()
+        return Result.success(Unit)
     }
 
     // --- Local JSON Persistence ---

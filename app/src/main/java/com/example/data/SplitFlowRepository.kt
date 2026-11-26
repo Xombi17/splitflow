@@ -560,19 +560,62 @@ class SplitFlowRepository(
         }
     }
 
-    override suspend fun addSettlement(userId: String, settlement: SettlementRecord): Result<String> {
+    override suspend fun addSettlement(
+        userId: String,
+        settlement: SettlementRecord,
+        preferredId: String?
+    ): Result<String> {
         val path = "users/$userId/settlements"
         return try {
             val uid = requireUserId(userId)
             require(settlement.amountMinorUnits > 0L) { "Settlement amount must be positive" }
             require(settlement.fromMemberId != settlement.toMemberId) { "Payer and payee must differ" }
-            val docRef = settlementsCol(uid).document()
+            val docRef = if (!preferredId.isNullOrBlank()) {
+                settlementsCol(uid).document(sanitizeDocId(preferredId, "set"))
+            } else {
+                settlementsCol(uid).document()
+            }
             docRef.set(settlement.toCreateMap(uid)).await()
             Result.success(docRef.id)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.CREATE, path)
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun updateSettlement(
+        userId: String,
+        settlementId: String,
+        settlement: SettlementRecord
+    ): Result<Unit> {
+        val path = "users/$userId/settlements/$settlementId"
+        return try {
+            val uid = requireUserId(userId)
+            require(settlementId.isNotBlank()) { "Settlement ID must not be blank" }
+            require(settlement.amountMinorUnits > 0L) { "Settlement amount must be positive" }
+            settlementsCol(uid).document(settlementId).update(settlement.toUpdateMap()).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, path)
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun deleteSettlement(userId: String, settlementId: String): Result<Unit> {
+        val path = "users/$userId/settlements/$settlementId"
+        return try {
+            val uid = requireUserId(userId)
+            require(settlementId.isNotBlank()) { "Settlement ID must not be blank" }
+            settlementsCol(uid).document(settlementId).delete().await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.DELETE, path)
             Result.failure(e)
         }
     }

@@ -5,8 +5,14 @@ import android.graphics.Bitmap
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.example.ai.LocalAiEngineState
+import com.example.ai.AiProviderKeyStore
+import com.example.ai.AiRouterStatus
+import com.example.ai.ApiKeyEntry
+import com.example.ai.ApiKeyTestResult
 import com.example.ai.LocalSplitAiService
+import com.example.ai.MultiProviderAiRouter
+import com.example.ai.RoutingStrategy
+import com.example.ai.SplitFlowLocale
 import com.example.data.DeviceContact
 import com.example.data.GuestLedgerRepository
 import com.example.data.GuestSessionStore
@@ -135,35 +141,43 @@ class SplitFlowViewModel(
     private val currentUserId: String
 ) : ViewModel() {
 
-    val localAiEngineState: StateFlow<LocalAiEngineState> = localAiService.engineState
+    val aiRouterStatus: StateFlow<AiRouterStatus> = localAiService.routerStatus
+    val aiKeyStore: AiProviderKeyStore = localAiService.keyStore
+    val aiRouter: MultiProviderAiRouter = localAiService.router
 
-    fun installWhistleModel(preferredSlug: String? = null) {
-        viewModelScope.launch {
-            val ok = localAiService.downloadWhistleModel(preferredSlug)
-            if (ok) {
-                val slug = localAiEngineState.value.whistleActiveSlug ?: "Whistle"
-                showToast("Cactus '$slug' ready on-device")
-            } else {
-                val err = localAiEngineState.value.whistleError ?: localAiEngineState.value.whistleNote
-                showToast("Cactus STT failed: $err", isError = true)
-            }
-        }
+    fun setAiRoutingStrategy(strategy: RoutingStrategy) {
+        aiKeyStore.setRoutingStrategy(strategy)
+        showToast("AI Routing: ${strategy.label}")
     }
 
-    fun installMirageModel(preferredSlug: String? = null) {
-        viewModelScope.launch {
-            val ok = localAiService.downloadMirageModel(preferredSlug)
-            if (ok) {
-                val slug = localAiEngineState.value.mirageActiveSlug ?: "Mirage"
-                showToast("Cactus '$slug' OCR ready on-device")
-            } else {
-                val err = localAiEngineState.value.mirageError ?: localAiEngineState.value.mirageNote
-                showToast("Cactus OCR failed: $err", isError = true)
-            }
+    fun addOrUpdateByokKey(entry: ApiKeyEntry, onResult: (Result<ApiKeyEntry>) -> Unit = {}) {
+        val result = aiKeyStore.addOrUpdateKey(entry)
+        result.onSuccess { saved ->
+            showToast("Saved ${saved.label} key locally (encrypted)")
+        }.onFailure { err ->
+            showToast(err.localizedMessage ?: "Could not save API key", isError = true)
         }
+        onResult(result)
     }
+
+    fun toggleByokKey(id: String, enabled: Boolean) {
+        aiKeyStore.toggleKeyEnabled(id, enabled)
+    }
+
+    fun removeByokKey(id: String) {
+        aiKeyStore.removeKey(id)
+        showToast("Removed API key from local vault")
+    }
+
+    fun resetByokCooldowns() {
+        aiKeyStore.resetAllCooldowns()
+        showToast("Reset provider cooldowns")
+    }
+
+    suspend fun testByokKey(entry: ApiKeyEntry): ApiKeyTestResult = aiRouter.testApiKey(entry)
 
     private var lastDeletedExpense: ExpenseRecord? = null
+    private var lastDeletedSettlement: SettlementRecord? = null
 
     private val _toastEvent = MutableStateFlow<ToastBannerEvent?>(null)
     val toastEvent: StateFlow<ToastBannerEvent?> = _toastEvent.asStateFlow()
@@ -291,11 +305,11 @@ class SplitFlowViewModel(
 
     // --- AI RECEIPT LENS ---
 
-    fun analyzeReceiptBitmap(bitmap: Bitmap) {
+    fun analyzeReceiptBitmap(bitmap: Bitmap, preferCloudAi: Boolean = false) {
         viewModelScope.launch {
             _receiptLensState.value = AsyncUiState.Loading
             try {
-                val parsed = localAiService.analyzeReceipt(bitmap)
+                val parsed = localAiService.analyzeReceipt(bitmap, preferCloudAi = preferCloudAi)
                 _receiptLensState.value = AsyncUiState.Success(parsed)
             } catch (e: CancellationException) {
                 throw e
@@ -312,52 +326,14 @@ class SplitFlowViewModel(
         _receiptLensState.value = AsyncUiState.Idle
     }
 
-    // --- AI VOICE ASSISTANT (MULTIMODAL AUDIO + DIRECT ACCOUNT MUTATION) ---
-
-    fun processVoiceAudio(
-        wavAudioBytes: ByteArray,
-        selectedGroupId: String?,
-        autoApply: Boolean = true
-    ) {
-        val currentSnapshot = (ledgerState.value as? LedgerUiState.Ready)?.snapshot ?: return
-        if (wavAudioBytes.size <= 44) {
-            _voiceSplitState.value = AsyncUiState.Error("Recording was too short. Tap the mic and speak clearly.")
-            return
-        }
-        val targetGroup = selectedGroupId?.let { gid -> currentSnapshot.groups.firstOrNull { it.id == gid } }
-
-        viewModelScope.launch {
-            _voiceSplitState.value = AsyncUiState.Loading
-            try {
-                val parsed = localAiService.transcribeAndParseVoiceAudio(
-                    wavAudioBytes = wavAudioBytes,
-                    members = currentSnapshot.members,
-                    groups = currentSnapshot.groups,
-                    defaultCurrency = targetGroup?.currencyEnum ?: currentSnapshot.defaultCurrency,
-                    groupMemoryNotes = targetGroup?.splitMemoryNotes
-                )
-                handleParsedVoiceCommand(
-                    parsed = parsed,
-                    currentSnapshot = currentSnapshot,
-                    explicitGroupId = selectedGroupId,
-                    autoApply = autoApply
-                )
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                Log.e(TAG, "AI Voice Audio processing failed", e)
-                _voiceSplitState.value = AsyncUiState.Error(
-                    e.localizedMessage ?: "Could not transcribe or understand audio. Please try again."
-                )
-            }
-        }
-    }
+    // --- MULTILINGUAL EDGE VOICE + MULTI-PROVIDER AI ASSISTANT ---
 
     fun parseNaturalLanguageSplit(
         transcript: String,
         targetGroupId: String?,
         autoApply: Boolean = true,
-        fromDeviceSpeechFallback: Boolean = false
+        fromDeviceSpeechFallback: Boolean = true,
+        locale: SplitFlowLocale = SplitFlowLocale.EN_IN
     ) {
         val currentSnapshot = (ledgerState.value as? LedgerUiState.Ready)?.snapshot ?: return
         val trimmed = transcript.trim()
@@ -376,7 +352,8 @@ class SplitFlowViewModel(
                     groups = currentSnapshot.groups,
                     defaultCurrency = targetGroup?.currencyEnum ?: currentSnapshot.defaultCurrency,
                     groupMemoryNotes = targetGroup?.splitMemoryNotes,
-                    fromDeviceSpeechFallback = fromDeviceSpeechFallback
+                    fromDeviceSpeech = fromDeviceSpeechFallback,
+                    locale = locale
                 )
                 handleParsedVoiceCommand(
                     parsed = parsed,
@@ -459,9 +436,15 @@ class SplitFlowViewModel(
     }
 
     fun undoVoiceExecution(result: VoiceExecutionResult) {
-        val expenseId = result.savedExpenseId ?: return
+        val expenseId = result.savedExpenseId
+        val settlementId = result.savedSettlementId
+        if (expenseId == null && settlementId == null) return
         viewModelScope.launch {
-            val res = repository.deleteExpense(currentUserId, expenseId)
+            val res = if (expenseId != null) {
+                repository.deleteExpense(currentUserId, expenseId)
+            } else {
+                repository.deleteSettlement(currentUserId, settlementId!!)
+            }
             res.onSuccess {
                 _voiceSplitState.value = AsyncUiState.Idle
                 showToast("Undid \"${result.parsed.ledgerSummaryLine.ifBlank { result.parsed.title }}\"")
@@ -929,6 +912,7 @@ class SplitFlowViewModel(
 
     fun deleteExpenseWithUndo(expense: ExpenseRecord) {
         viewModelScope.launch {
+            lastDeletedSettlement = null
             lastDeletedExpense = expense
             val result = repository.deleteExpense(currentUserId, expense.id)
             result.onSuccess {
@@ -940,15 +924,57 @@ class SplitFlowViewModel(
         }
     }
 
-    fun undoLastDelete() {
-        val toRestore = lastDeletedExpense ?: return
-        lastDeletedExpense = null
+    fun updateSettlement(settlement: SettlementRecord, onComplete: () -> Unit = {}) {
         viewModelScope.launch {
-            val result = repository.addExpense(currentUserId, toRestore, preferredId = toRestore.id.takeIf { it.isNotBlank() })
+            _isActionBusy.value = true
+            val result = repository.updateSettlement(currentUserId, settlement.id, settlement)
+            _isActionBusy.value = false
             result.onSuccess {
-                showToast("Restored \"${toRestore.title}\"")
+                showToast("Updated settlement (${FinanceEngine.formatMinorUnits(settlement.amountMinorUnits, settlement.currencyEnum)})")
+                onComplete()
             }.onFailure { err ->
-                showToast(err.localizedMessage ?: "Could not restore expense", isError = true)
+                showToast(err.localizedMessage ?: "Failed to update settlement", isError = true)
+            }
+        }
+    }
+
+    fun deleteSettlementWithUndo(settlement: SettlementRecord) {
+        viewModelScope.launch {
+            lastDeletedExpense = null
+            lastDeletedSettlement = settlement
+            val result = repository.deleteSettlement(currentUserId, settlement.id)
+            result.onSuccess {
+                val amtStr = FinanceEngine.formatMinorUnits(settlement.amountMinorUnits, settlement.currencyEnum)
+                showToast("Deleted settlement ($amtStr)", actionLabel = "UNDO")
+            }.onFailure { err ->
+                lastDeletedSettlement = null
+                showToast(err.localizedMessage ?: "Failed to delete settlement", isError = true)
+            }
+        }
+    }
+
+    fun undoLastDelete() {
+        val expToRestore = lastDeletedExpense
+        val settlementToRestore = lastDeletedSettlement
+        if (expToRestore != null) {
+            lastDeletedExpense = null
+            viewModelScope.launch {
+                val result = repository.addExpense(currentUserId, expToRestore, preferredId = expToRestore.id.takeIf { it.isNotBlank() })
+                result.onSuccess {
+                    showToast("Restored \"${expToRestore.title}\"")
+                }.onFailure { err ->
+                    showToast(err.localizedMessage ?: "Could not restore expense", isError = true)
+                }
+            }
+        } else if (settlementToRestore != null) {
+            lastDeletedSettlement = null
+            viewModelScope.launch {
+                val result = repository.addSettlement(currentUserId, settlementToRestore, preferredId = settlementToRestore.id.takeIf { it.isNotBlank() })
+                result.onSuccess {
+                    showToast("Restored settlement")
+                }.onFailure { err ->
+                    showToast(err.localizedMessage ?: "Could not restore settlement", isError = true)
+                }
             }
         }
     }

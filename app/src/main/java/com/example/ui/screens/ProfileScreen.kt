@@ -37,7 +37,9 @@ import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Explore
 import androidx.compose.material.icons.rounded.Fullscreen
+import androidx.compose.material.icons.rounded.Key
 import androidx.compose.material.icons.rounded.QrCode2
+import androidx.compose.material.icons.rounded.RecordVoiceOver
 import androidx.compose.material.icons.rounded.Save
 import androidx.compose.material.icons.rounded.Slideshow
 import androidx.compose.material3.AlertDialog
@@ -71,6 +73,10 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.example.ai.RoutingStrategy
+import com.example.ai.SplitFlowLocale
+import com.example.ai.SplitFlowVoicePersona
+import com.example.ai.VoiceSettingsState
 import com.example.data.ReceiptPhotoStore
 import com.example.data.UpiQrStore
 import com.example.engine.FinanceEngine
@@ -107,6 +113,13 @@ fun ProfileScreen(
     onReplayLaunchAnimation: () -> Unit,
     onSignInWithGoogle: () -> Unit,
     onSignOut: () -> Unit,
+    voiceSettings: VoiceSettingsState = VoiceSettingsState(),
+    activeByokKeyCount: Int = 0,
+    routingStrategy: RoutingStrategy = RoutingStrategy.BYOK_FIRST_THEN_FIREBASE,
+    onSelectVoiceLocale: (SplitFlowLocale) -> Unit = {},
+    onSelectVoicePersona: (SplitFlowVoicePersona) -> Unit = {},
+    onToggleWakeWord: (Boolean) -> Unit = {},
+    onOpenAiProviderSettings: () -> Unit = {},
     onClose: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
@@ -545,6 +558,116 @@ fun ProfileScreen(
                         Icon(Icons.Rounded.Save, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(8.dp))
                         Text("Save Preferences")
+                    }
+                }
+            }
+        }
+
+        // Voice & Multi-Provider AI Settings Card
+        item {
+            EditorialCard(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.RecordVoiceOver,
+                            contentDescription = null,
+                            tint = tokens.aiAccent,
+                            modifier = Modifier.size(19.dp)
+                        )
+                        Text("Voice & AI Providers", style = MaterialTheme.typography.titleMedium)
+                    }
+
+                    // BYOK API Keys & Routing launcher
+                    Surface(
+                        onClick = onOpenAiProviderSettings,
+                        shape = RoundedCornerShape(14.dp),
+                        color = tokens.aiContainer.copy(alpha = 0.45f),
+                        border = BorderStroke(1.dp, tokens.aiAccent.copy(alpha = 0.35f)),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("profile_open_ai_keys_button")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Key,
+                                    contentDescription = null,
+                                    tint = tokens.aiAccent,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Column {
+                                    Text(
+                                        text = "AI Providers & API Keys",
+                                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold)
+                                    )
+                                    Text(
+                                        text = if (activeByokKeyCount > 0) {
+                                            "$activeByokKeyCount custom key(s) in round-robin · ${routingStrategy.label}"
+                                        } else {
+                                            "Built-in Gemini 3 · Tap to add Groq / OpenRouter / Cerebras keys"
+                                        },
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    Text("Voice Recognition Language", style = MaterialTheme.typography.labelMedium)
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        SplitFlowLocale.entries.forEach { loc ->
+                            FilterChip(
+                                selected = voiceSettings.locale == loc,
+                                onClick = { onSelectVoiceLocale(loc) },
+                                label = { Text("${loc.shortBadge} · ${loc.displayName}") }
+                            )
+                        }
+                    }
+
+                    Text("Voice Assistant Persona", style = MaterialTheme.typography.labelMedium)
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        SplitFlowVoicePersona.entries.forEach { p ->
+                            FilterChip(
+                                selected = voiceSettings.persona == p,
+                                onClick = { onSelectVoicePersona(p) },
+                                label = { Text("${p.displayName} (${p.styleLabel})") }
+                            )
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Hands-free \"Hey SplitFlow\"", style = MaterialTheme.typography.titleSmall)
+                            Text(
+                                "Listen for wake phrase while app is in the foreground",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(
+                            checked = voiceSettings.wakeWordEnabled,
+                            onCheckedChange = onToggleWakeWord,
+                            modifier = Modifier.testTag("profile_wake_word_switch")
+                        )
                     }
                 }
             }

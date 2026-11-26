@@ -10,9 +10,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag (for example, v1.0.1)"
+        description: "Release tag (for example, v1.2.0)"
         required: true
-        default: "v1.0.1"
+        default: "v1.2.0"
 
 permissions:
   contents: write
@@ -50,25 +50,28 @@ jobs:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
           STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
         run: |
           KEYSTORE_DEST="$RUNNER_TEMP/splitflow-upload.jks"
-          if [ -n "$KEYSTORE_BASE64" ]; then
+          RESOLVED_ALIAS="${KEY_ALIAS:-upload}"
+          if [ -n "$KEYSTORE_BASE64" ] && [ -n "$STORE_PASSWORD" ] && [ -n "$KEY_PASSWORD" ]; then
             printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_DEST"
             echo "KEYSTORE_PATH=$KEYSTORE_DEST" >> "$GITHUB_ENV"
             echo "STORE_PASSWORD=$STORE_PASSWORD" >> "$GITHUB_ENV"
             echo "KEY_PASSWORD=$KEY_PASSWORD" >> "$GITHUB_ENV"
-          elif [ -f .github/splitflow-permanent-keystore.b64 ]; then
-            base64 --decode .github/splitflow-permanent-keystore.b64 > "$KEYSTORE_DEST"
-            echo "KEYSTORE_PATH=$KEYSTORE_DEST" >> "$GITHUB_ENV"
-            echo "STORE_PASSWORD=splitflow-permanent-key-2026" >> "$GITHUB_ENV"
-            echo "KEY_PASSWORD=splitflow-permanent-key-2026" >> "$GITHUB_ENV"
+            echo "KEY_ALIAS=$RESOLVED_ALIAS" >> "$GITHUB_ENV"
+            echo "Loaded permanent release keystore from GitHub Secrets (alias: $RESOLVED_ALIAS)."
+          elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            echo "::error::Release tags require KEYSTORE_BASE64, STORE_PASSWORD, and KEY_PASSWORD secrets so Google Sign-In SHA-1/SHA-256 fingerprints stay consistent."
+            exit 1
           else
-            CI_PASSWORD="splitflow-ci-release"
+            echo "::warning::KEYSTORE_BASE64 secret not configured — generating an ephemeral CI keystore. Google Sign-In will NOT work on this APK until permanent keystore secrets are set and its SHA-1/SHA-256 is added to Firebase Console."
+            CI_PASSWORD="$(openssl rand -hex 16)"
             keytool -genkeypair -v \
               -keystore "$KEYSTORE_DEST" \
               -storepass "$CI_PASSWORD" \
               -keypass "$CI_PASSWORD" \
-              -alias upload \
+              -alias "$RESOLVED_ALIAS" \
               -keyalg RSA \
               -keysize 2048 \
               -validity 10000 \
@@ -76,6 +79,7 @@ jobs:
             echo "KEYSTORE_PATH=$KEYSTORE_DEST" >> "$GITHUB_ENV"
             echo "STORE_PASSWORD=$CI_PASSWORD" >> "$GITHUB_ENV"
             echo "KEY_PASSWORD=$CI_PASSWORD" >> "$GITHUB_ENV"
+            echo "KEY_ALIAS=$RESOLVED_ALIAS" >> "$GITHUB_ENV"
           fi
 
       - name: Decode Firebase configuration
@@ -84,14 +88,21 @@ jobs:
         run: |
           if [ -n "$GOOGLE_SERVICES_JSON" ]; then
             printf '%s' "$GOOGLE_SERVICES_JSON" | base64 --decode > app/google-services.json
+            echo "Loaded app/google-services.json from GitHub Secret GOOGLE_SERVICES_JSON."
           elif [ -f app/google-services.json ]; then
-            echo "Using committed offline fallback app/google-services.json"
+            echo "::warning::GOOGLE_SERVICES_JSON secret not set; using committed app/google-services.json. Ensure it matches your Firebase project and includes your release keystore SHA-1/SHA-256."
+          elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            echo "::error::Release tags require the GOOGLE_SERVICES_JSON secret (base64-encoded google-services.json downloaded from Firebase Console)."
+            exit 1
           fi
+
+      - name: Run unit tests
+        run: ./gradlew --no-daemon :app:testDebugUnitTest
 
       - name: Build release APK
         run: ./gradlew --no-daemon clean :app:assembleRelease
 
-      - name: Name APK and generate checksum
+      - name: Name APK, print signing SHA fingerprints, and generate checksum
         run: |
           TAG="${GITHUB_REF_NAME}"
           if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
@@ -110,6 +121,10 @@ jobs:
           cp "$APK" "SplitFlow-${TAG}-release.apk"
           sha256sum "SplitFlow-${TAG}-release.apk" > "SplitFlow-${TAG}-release.apk.sha256"
           echo "RELEASE_TAG=$TAG" >> "$GITHUB_ENV"
+
+          echo "=== Release APK Signing Certificate Fingerprints ==="
+          echo "Add BOTH SHA-1 and SHA-256 below to Firebase Console -> Project Settings -> Android App (com.aistudio.splitflow.kvnxqr) for Google Sign-In:"
+          keytool -printcert -jarfile "SplitFlow-${TAG}-release.apk" | grep -E "SHA1:|SHA256:" || true
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4

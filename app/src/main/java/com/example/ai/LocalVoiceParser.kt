@@ -16,7 +16,7 @@ import kotlin.math.roundToLong
 
 /**
  * Deterministic on-device financial command interpreter for SplitFlow.
- * Converts transcripts from Speech Recognition / Cactus Whistle (or typed text) into exact
+ * Converts transcripts from Native Speech Recognition (or typed text) into exact
  * ledger actions with fuzzy friend-name matching, N-best hypothesis scoring, and natural phrasing.
  */
 object LocalVoiceParser {
@@ -99,7 +99,10 @@ object LocalVoiceParser {
         defaultCurrency: CurrencyCode,
         engineLabel: String = "Local AI"
     ): ParsedVoiceSplit {
-        val rawCleaned = rawInput.trim().replace(Regex("\\s+"), " ")
+        val rawCleaned = rawInput.trim()
+            .replace(Regex("^(?:hey|ok|okay|hi)\\s+split\\s*flow[,:\\s-]*", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("\\s+"), " ")
+            .trim()
         require(rawCleaned.isNotBlank()) { "Please speak or type a command first." }
 
         // Repair split/phonetically misheard known friend names (e.g. "Tan may" -> "Tanmay")
@@ -197,99 +200,56 @@ object LocalVoiceParser {
             )
         }
 
-        // 2. Direct IOU: "<Name> owes me 500" / "<Name> owes 500" / "<Name> has to give 500" / "I lent <Name> 500" / "<Name> took 500 from me" / "add 500 on <Name>"
-        val friendOwesMeMatch = Regex(
-            "(?:^|\\b)([A-Za-z][A-Za-z']+)\\s+(?:owes|owe|owed|has to pay|needs to pay|has to give|needs to give)(?:\\s+(?:me|us))?\\b",
-            RegexOption.IGNORE_CASE
-        ).find(transcript)?.takeIf {
-            val subject = it.groupValues[1].lowercase(Locale.US)
-            subject != "i" && subject != "we" && subject !in stopWords
-        } ?: Regex(
-            "\\b(?:i\\s+)?(?:lent|lend|gave)\\s+([A-Za-z][A-Za-z']+)\\b",
-            RegexOption.IGNORE_CASE
-        ).find(transcript) ?: Regex(
-            "(?:^|\\b)([A-Za-z][A-Za-z']+)\\s+(?:borrowed|took)\\s+.*?\\s+from\\s+me\\b",
-            RegexOption.IGNORE_CASE
-        ).find(transcript) ?: Regex(
-            "\\b(?:add|put|log)\\s+.*?\\s+(?:on|for|against)\\s+([A-Za-z][A-Za-z']+)\\b",
-            RegexOption.IGNORE_CASE
-        ).find(transcript)?.takeIf {
-            !lower.contains("split") && !lower.contains("with ")
-        } ?: if (!lower.contains("split") && !lower.contains("with ") && !lower.contains("owe")) {
-            Regex("^(?:add\\s+|put\\s+|log\\s+)?([A-Za-z][A-Za-z']+)\\s+(?:ko\\s+)?(?:₹|\\$|€|£|rs\\.?\\s*)?\\d+", RegexOption.IGNORE_CASE).find(transcript)?.takeIf {
-                val name = it.groupValues[1].lowercase(Locale.US)
-                name !in stopWords && name != "i" && name != "we" && name != "paid"
-            } ?: Regex("(?:₹|\\$|€|£|rs\\.?\\s*)?\\d+\\s+(?:on|for|against|to|ko)\\s+([A-Za-z][A-Za-z']+)", RegexOption.IGNORE_CASE).find(transcript)?.takeIf {
-                val name = it.groupValues[1].lowercase(Locale.US)
-                name !in stopWords && name != "me" && name != "us"
-            }
-        } else null
+        // 2. Direct IOU: Friend owes me 100% (never 2-way split!)
+        tryParseDirectIouFriendOwesMe(
+            transcript = transcript,
+            lower = lower,
+            amountMinor = amountMinor,
+            currency = currency,
+            category = category,
+            reason = reason,
+            matchedGroup = matchedGroup,
+            engineLabel = engineLabel,
+            selfId = selfId,
+            selfName = selfName,
+            amountText = amountText,
+            pendingNew = pendingNew,
+            resolvePerson = ::resolvePerson
+        )?.let { return it }
 
-        if (friendOwesMeMatch != null) {
-            val rawName = friendOwesMeMatch.groupValues[1]
-            if (rawName.lowercase(Locale.US) !in stopWords) {
-                val (friendId, friendName) = resolvePerson(rawName)
-                val friendFirst = friendName.split(" ").first()
-                val title = if (reason != null) "$reason — $friendFirst owes you" else "$friendFirst owes you"
-                val summary = "$friendFirst owes you $amountText"
-                return ParsedVoiceSplit(
-                    transcript = transcript,
-                    actionType = VoiceActionType.DIRECT_IOU,
-                    title = title,
-                    totalMinorUnits = amountMinor,
-                    currency = currency,
-                    paidByMemberId = selfId,
-                    paidByMemberName = selfName,
-                    category = category,
-                    splitType = SplitType.EXACT,
-                    participants = listOf(ParsedVoiceParticipant(friendId, friendName, amountMinor, 1L, 10_000L)),
-                    aiConfidenceNote = "Direct IOU parsed via $engineLabel",
-                    matchedGroupId = matchedGroup?.id,
-                    newMemberNames = pendingNew.toList(),
-                    assistantReply = "Done! Logged $amountText so $friendFirst owes you $amountText.",
-                    ledgerSummaryLine = summary
-                )
-            }
-        }
+        // 3. Reverse Direct IOU: I owe Friend 100% (never 2-way split!)
+        tryParseDirectIouIOweFriend(
+            transcript = transcript,
+            lower = lower,
+            amountMinor = amountMinor,
+            currency = currency,
+            category = category,
+            reason = reason,
+            matchedGroup = matchedGroup,
+            engineLabel = engineLabel,
+            selfId = selfId,
+            selfName = selfName,
+            amountText = amountText,
+            pendingNew = pendingNew,
+            resolvePerson = ::resolvePerson
+        )?.let { return it }
 
-        // 3. Direct IOU reverse: "I owe <Name> 500" / "Borrowed 500 from <Name>" / "<Name> lent me 500" / "I have to pay <Name> 500"
-        val iOweFriendMatch = Regex(
-            "\\b(?:i\\s+)?(?:owe|have to pay|need to pay|have to give|need to give)\\s+([A-Za-z][A-Za-z']+)\\b",
-            RegexOption.IGNORE_CASE
-        ).find(transcript) ?: Regex(
-            "\\b(?:borrowed|took)\\s+.*?\\s+from\\s+([A-Za-z][A-Za-z']+)\\b",
-            RegexOption.IGNORE_CASE
-        ).find(transcript) ?: Regex(
-            "(?:^|\\b)([A-Za-z][A-Za-z']+)\\s+lent\\s+me\\b",
-            RegexOption.IGNORE_CASE
-        ).find(transcript)
-
-        if (iOweFriendMatch != null) {
-            val rawName = iOweFriendMatch.groupValues[1]
-            if (rawName.lowercase(Locale.US) !in stopWords) {
-                val (friendId, friendName) = resolvePerson(rawName)
-                val friendFirst = friendName.split(" ").first()
-                val title = if (reason != null) "$reason — You owe $friendFirst" else "You owe $friendFirst"
-                val summary = "You owe $friendFirst $amountText"
-                return ParsedVoiceSplit(
-                    transcript = transcript,
-                    actionType = VoiceActionType.DIRECT_IOU,
-                    title = title,
-                    totalMinorUnits = amountMinor,
-                    currency = currency,
-                    paidByMemberId = friendId,
-                    paidByMemberName = friendName,
-                    category = category,
-                    splitType = SplitType.EXACT,
-                    participants = listOf(ParsedVoiceParticipant(selfId, selfName, amountMinor, 1L, 10_000L)),
-                    aiConfidenceNote = "Direct IOU parsed via $engineLabel",
-                    matchedGroupId = matchedGroup?.id,
-                    newMemberNames = pendingNew.toList(),
-                    assistantReply = "Got it! Logged $amountText so you owe $friendFirst $amountText.",
-                    ledgerSummaryLine = summary
-                )
-            }
-        }
+        // 3b. Percentage Split: "Split 2000 with Tanmay 70 30" or "70% me 30% Tanmay"
+        tryParsePercentageSplit(
+            transcript = transcript,
+            amountMinor = amountMinor,
+            currency = currency,
+            category = category,
+            reason = reason,
+            matchedGroup = matchedGroup,
+            engineLabel = engineLabel,
+            selfId = selfId,
+            selfName = selfName,
+            amountText = amountText,
+            members = members,
+            pendingNew = pendingNew,
+            resolvePerson = ::resolvePerson
+        )?.let { return it }
 
         // 4. Shared Expense Split (including optional "except <Name> skipped <amt>" math)
         val paidByMatch = Regex(
@@ -385,6 +345,268 @@ object LocalVoiceParser {
             newMemberNames = pendingNew.toList(),
             assistantReply = "Done! Split $amountText for $splitTitle across ${participants.size} people.",
             ledgerSummaryLine = summaryLine
+        )
+    }
+
+    /**
+     * Returns true when a transcript contains non-Latin script (Hindi/Marathi/Tamil),
+     * multiple itemized prices, or complex phrasing best interpreted by Gemini / BYOK AI.
+     */
+    fun shouldEscalateToCloudAi(transcript: String): Boolean {
+        val trimmed = transcript.trim()
+        if (trimmed.isEmpty()) return false
+        val hasNonLatinScript = trimmed.any { ch ->
+            ch.code in 0x0900..0x097F || // Devanagari (Hindi/Marathi)
+                ch.code in 0x0B80..0x0BFF // Tamil
+        }
+        if (hasNonLatinScript) return true
+        // Multiple distinct prices (likely itemized bill dictation like "pizza 800 and pasta 500")
+        val priceCount = Regex("\\b\\d{2,6}(?:\\.\\d{1,2})?\\b").findAll(trimmed).count()
+        if (priceCount >= 3 && !trimmed.contains("%")) return true
+        return false
+    }
+
+    // 2. Direct IOU: "<Name> owes me 500" / "<Name> se 500 lena hai" / "<Name> ke 500 baki" / "I lent <Name> 500"
+    private fun tryParseDirectIouFriendOwesMe(
+        transcript: String,
+        lower: String,
+        amountMinor: Long,
+        currency: CurrencyCode,
+        category: ExpenseCategory,
+        reason: String?,
+        matchedGroup: ExpenseGroup?,
+        engineLabel: String,
+        selfId: String,
+        selfName: String,
+        amountText: String,
+        pendingNew: MutableSet<String>,
+        resolvePerson: (String) -> Pair<String, String>
+    ): ParsedVoiceSplit? {
+        // Do not hijack explicit reverse-IOU Hinglish phrases like "Tanmay ko 500 dena hai"
+        val isReverseHinglish = Regex(
+            "(?:^|\\b)[A-Za-z][A-Za-z']+\\s+(?:ko|la)\\s+.*?\\b(?:dena|dene|dyayche|tharanum)\\b",
+            RegexOption.IGNORE_CASE
+        ).containsMatchIn(transcript)
+        if (isReverseHinglish) return null
+
+        val friendOwesMeMatch = Regex(
+            "(?:^|\\b)([A-Za-z][A-Za-z']+)\\s+(?:owes|owe|owed|has to pay|needs to pay|has to give|needs to give)(?:\\s+(?:me|us))?\\b",
+            RegexOption.IGNORE_CASE
+        ).find(transcript)?.takeIf {
+            val subject = it.groupValues[1].lowercase(Locale.US)
+            subject != "i" && subject != "we" && subject !in stopWords
+        } ?: Regex(
+            "(?:^|\\b)([A-Za-z][A-Za-z']+)\\s+(?:se|ke|kade)\\s+.*?\\b(?:lena|baki|baaki|dene|dega|degi|milega)\\b",
+            RegexOption.IGNORE_CASE
+        ).find(transcript)?.takeIf {
+            val subject = it.groupValues[1].lowercase(Locale.US)
+            subject != "i" && subject != "we" && subject !in stopWords
+        } ?: Regex(
+            "(?:^|\\b)([A-Za-z][A-Za-z']+)\\s+(?:mujhe|enakku|mala)\\s+.*?\\b(?:dega|degi|dena|tharanum|dyayche|owes)\\b",
+            RegexOption.IGNORE_CASE
+        ).find(transcript)?.takeIf {
+            val subject = it.groupValues[1].lowercase(Locale.US)
+            subject != "i" && subject != "we" && subject !in stopWords
+        } ?: Regex(
+            "\\b(?:i\\s+)?(?:lent|lend|gave)\\s+([A-Za-z][A-Za-z']+)\\b",
+            RegexOption.IGNORE_CASE
+        ).find(transcript) ?: Regex(
+            "(?:^|\\b)([A-Za-z][A-Za-z']+)\\s+(?:borrowed|took)\\s+.*?\\s+from\\s+me\\b",
+            RegexOption.IGNORE_CASE
+        ).find(transcript) ?: Regex(
+            "\\b(?:add|put|log)\\s+.*?\\s+(?:on|for|against)\\s+([A-Za-z][A-Za-z']+)\\b",
+            RegexOption.IGNORE_CASE
+        ).find(transcript)?.takeIf {
+            !lower.contains("split") && !lower.contains("with ") && !lower.contains("%")
+        } ?: if (!lower.contains("split") && !lower.contains("with ") && !lower.contains("owe") && !lower.contains("%")) {
+            Regex("^(?:add\\s+|put\\s+|log\\s+)?([A-Za-z][A-Za-z']+)\\s+(?:ko\\s+)?(?:₹|\\$|€|£|rs\\.?\\s*)?\\d+", RegexOption.IGNORE_CASE).find(transcript)?.takeIf {
+                val name = it.groupValues[1].lowercase(Locale.US)
+                name !in stopWords && name != "i" && name != "we" && name != "paid"
+            } ?: Regex("(?:₹|\\$|€|£|rs\\.?\\s*)?\\d+\\s+(?:on|for|against|to|ko)\\s+([A-Za-z][A-Za-z']+)", RegexOption.IGNORE_CASE).find(transcript)?.takeIf {
+                val name = it.groupValues[1].lowercase(Locale.US)
+                name !in stopWords && name != "me" && name != "us"
+            }
+        } else null
+
+        if (friendOwesMeMatch != null) {
+            val rawName = friendOwesMeMatch.groupValues[1]
+            if (rawName.lowercase(Locale.US) !in stopWords) {
+                val (friendId, friendName) = resolvePerson(rawName)
+                val friendFirst = friendName.split(" ").first()
+                val title = if (reason != null) "$reason — $friendFirst owes you" else "$friendFirst owes you"
+                val summary = "Direct IOU · $friendFirst owes you $amountText"
+                return ParsedVoiceSplit(
+                    transcript = transcript,
+                    actionType = VoiceActionType.DIRECT_IOU,
+                    title = title,
+                    totalMinorUnits = amountMinor,
+                    currency = currency,
+                    paidByMemberId = selfId,
+                    paidByMemberName = selfName,
+                    category = category,
+                    splitType = SplitType.EXACT,
+                    participants = listOf(ParsedVoiceParticipant(friendId, friendName, amountMinor, 1L, 10_000L)),
+                    aiConfidenceNote = "Direct IOU (100% owed by $friendFirst) · $engineLabel",
+                    matchedGroupId = matchedGroup?.id,
+                    newMemberNames = pendingNew.toList(),
+                    assistantReply = "Done! Logged $amountText so $friendFirst owes you the full $amountText.",
+                    ledgerSummaryLine = summary
+                )
+            }
+        }
+        return null
+    }
+
+    // 3. Reverse Direct IOU: "I owe <Name> 500" / "I borrowed 500 from <Name>" / "<Name> ko 500 dena hai"
+    private fun tryParseDirectIouIOweFriend(
+        transcript: String,
+        lower: String,
+        amountMinor: Long,
+        currency: CurrencyCode,
+        category: ExpenseCategory,
+        reason: String?,
+        matchedGroup: ExpenseGroup?,
+        engineLabel: String,
+        selfId: String,
+        selfName: String,
+        amountText: String,
+        pendingNew: MutableSet<String>,
+        resolvePerson: (String) -> Pair<String, String>
+    ): ParsedVoiceSplit? {
+        val iOweFriendMatch = Regex(
+            "\\b(?:i|we)\\s+(?:owe|owed|need to pay|have to pay|need to give|have to give)\\s+([A-Za-z][A-Za-z']+)\\b",
+            RegexOption.IGNORE_CASE
+        ).find(transcript) ?: Regex(
+            "\\b(?:i|we)\\s+(?:borrowed|took)\\s+.*?\\s+from\\s+([A-Za-z][A-Za-z']+)\\b",
+            RegexOption.IGNORE_CASE
+        ).find(transcript) ?: Regex(
+            "(?:^|\\b)([A-Za-z][A-Za-z']+)\\s+(?:ko|la)\\s+.*?\\b(?:dena|dene|dyayche|tharanum)\\b",
+            RegexOption.IGNORE_CASE
+        ).find(transcript)?.takeIf {
+            val subject = it.groupValues[1].lowercase(Locale.US)
+            subject != "i" && subject != "we" && subject !in stopWords
+        }
+
+        if (iOweFriendMatch != null && !lower.contains("split")) {
+            val rawName = iOweFriendMatch.groupValues[1]
+            if (rawName.lowercase(Locale.US) !in stopWords) {
+                val (friendId, friendName) = resolvePerson(rawName)
+                val friendFirst = friendName.split(" ").first()
+                val title = if (reason != null) "$reason — You owe $friendFirst" else "You owe $friendFirst"
+                val summary = "Direct IOU · You owe $friendFirst $amountText"
+                return ParsedVoiceSplit(
+                    transcript = transcript,
+                    actionType = VoiceActionType.DIRECT_IOU,
+                    title = title,
+                    totalMinorUnits = amountMinor,
+                    currency = currency,
+                    paidByMemberId = friendId,
+                    paidByMemberName = friendName,
+                    category = category,
+                    splitType = SplitType.EXACT,
+                    participants = listOf(ParsedVoiceParticipant(selfId, selfName, amountMinor, 1L, 10_000L)),
+                    aiConfidenceNote = "Direct IOU (100% owed to $friendFirst) · $engineLabel",
+                    matchedGroupId = matchedGroup?.id,
+                    newMemberNames = pendingNew.toList(),
+                    assistantReply = "Done! Logged $amountText so you owe $friendFirst the full $amountText.",
+                    ledgerSummaryLine = summary
+                )
+            }
+        }
+        return null
+    }
+
+    private fun tryParsePercentageSplit(
+        transcript: String,
+        amountMinor: Long,
+        currency: CurrencyCode,
+        category: ExpenseCategory,
+        reason: String?,
+        matchedGroup: ExpenseGroup?,
+        engineLabel: String,
+        selfId: String,
+        selfName: String,
+        amountText: String,
+        members: List<LedgerMember>,
+        pendingNew: MutableSet<String>,
+        resolvePerson: (String) -> Pair<String, String>
+    ): ParsedVoiceSplit? {
+        // Match patterns like "70% me 30% Tanmay", "60 40", "70/30", "split 2000 with Tanmay 70 30"
+        val explicitPctPairs = Regex("(\\d{1,3})\\s*%\\s*(?:for\\s+|to\\s+)?([A-Za-z][A-Za-z']+)", RegexOption.IGNORE_CASE)
+            .findAll(transcript).toList()
+        val trailingRatioMatch = Regex("\\b(\\d{2})\\s*(?:/|\\s+|-)\\s*(\\d{2})\\b")
+            .findAll(transcript)
+            .lastOrNull { m ->
+                val a = m.groupValues[1].toIntOrNull() ?: 0
+                val b = m.groupValues[2].toIntOrNull() ?: 0
+                a in 5..95 && b in 5..95 && (a + b) == 100
+            }
+
+        if (explicitPctPairs.isEmpty() && trailingRatioMatch == null) return null
+
+        val bpsMap = linkedMapOf<String, Long>()
+        val nameMap = linkedMapOf<String, String>()
+
+        if (explicitPctPairs.size >= 2) {
+            var totalPct = 0
+            explicitPctPairs.forEach { m ->
+                val pct = m.groupValues[1].toIntOrNull() ?: 0
+                val rawName = m.groupValues[2]
+                val (id, resolvedName) = resolvePerson(rawName)
+                if (id.isNotBlank() && pct in 1..100) {
+                    bpsMap[id] = pct * 100L
+                    nameMap[id] = resolvedName
+                    totalPct += pct
+                }
+            }
+            if (totalPct != 100 || bpsMap.size < 2) return null
+        } else if (trailingRatioMatch != null) {
+            val firstPct = trailingRatioMatch.groupValues[1].toInt()
+            val secondPct = trailingRatioMatch.groupValues[2].toInt()
+            val friendCandidate = extractCandidateNames(transcript, members).firstOrNull() ?: return null
+            val (friendId, friendName) = resolvePerson(friendCandidate)
+            if (selfId.isBlank() || friendId.isBlank() || friendId == selfId) return null
+            bpsMap[selfId] = firstPct * 100L
+            nameMap[selfId] = selfName
+            bpsMap[friendId] = secondPct * 100L
+            nameMap[friendId] = friendName
+        } else {
+            return null
+        }
+
+        val allocs = FinanceEngine.distributeByPercentage(amountMinor, bpsMap)
+        val participants = allocs.map { alloc ->
+            ParsedVoiceParticipant(
+                memberId = alloc.memberId,
+                memberName = nameMap[alloc.memberId] ?: "Member",
+                amountMinorUnits = alloc.amountMinorUnits,
+                shares = 1L,
+                percentageBps = alloc.percentageBps
+            )
+        }
+        val splitTitle = reason ?: when (category) {
+            ExpenseCategory.FOOD -> "Shared Meal"
+            ExpenseCategory.TRAVEL -> "Shared Ride"
+            ExpenseCategory.STAY -> "Shared Stay"
+            else -> "Percentage Split"
+        }
+        val ratioLabel = participants.joinToString("/") { "${it.percentageBps / 100}%" }
+        return ParsedVoiceSplit(
+            transcript = transcript,
+            actionType = VoiceActionType.SHARED_EXPENSE,
+            title = splitTitle,
+            totalMinorUnits = amountMinor,
+            currency = currency,
+            paidByMemberId = selfId,
+            paidByMemberName = selfName,
+            category = category,
+            splitType = SplitType.PERCENTAGE,
+            participants = participants,
+            aiConfidenceNote = "Percentage split ($ratioLabel) · $engineLabel",
+            matchedGroupId = matchedGroup?.id,
+            newMemberNames = pendingNew.toList(),
+            assistantReply = "Done! Split $amountText for $splitTitle by percentage ($ratioLabel).",
+            ledgerSummaryLine = "$splitTitle · $amountText ($ratioLabel)"
         )
     }
 

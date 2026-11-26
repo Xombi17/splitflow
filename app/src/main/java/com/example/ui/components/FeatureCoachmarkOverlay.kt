@@ -86,7 +86,7 @@ private val HOME_COACHMARK_STEPS = listOf(
     ),
     CoachmarkStep(
         title = "AI Quick Tools (Scan · Voice · Batch · Coach)",
-        body = "Scan single restaurant bills with local Mirage OCR, dictate splits via Cactus Whistle, batch-import up to 8 trip receipts, or open your On-Device Spend Coach.",
+        body = "Scan single restaurant bills with ML Kit + Gemini OCR, dictate multilingual splits by voice, batch-import up to 8 trip receipts, or open your AI Spend Coach.",
         icon = Icons.Rounded.AutoAwesome,
         anchor = CoachmarkAnchor.UPPER_MID_TOOLS
     ),

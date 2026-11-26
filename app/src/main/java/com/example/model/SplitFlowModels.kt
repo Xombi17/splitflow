@@ -475,6 +475,19 @@ data class SettlementRecord(
         @Suppress("UNCHECKED_CAST")
         return raw.filterValues { it != null } as Map<String, Any>
     }
+
+    fun toUpdateMap(): Map<String, Any> {
+        val map = mutableMapOf<String, Any>(
+            "amountMinorUnits" to amountMinorUnits.coerceAtLeast(1L),
+            "currency" to CurrencyCode.fromRaw(currency).name,
+            "paymentMethod" to PaymentMethod.fromRaw(paymentMethod).name,
+            "dateLabel" to dateLabel.trim().ifBlank { "2026-11-26" }.take(40),
+            "updatedAt" to FieldValue.serverTimestamp()
+        )
+        note?.trim()?.takeIf { it.isNotEmpty() }?.let { map["note"] = it.take(200) }
+        paymentProofPath?.trim()?.takeIf { it.isNotEmpty() }?.let { map["paymentProofPath"] = it.take(300) }
+        return map
+    }
 }
 
 // --- DOMAIN & ANALYTICS MODELS ---

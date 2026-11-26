@@ -71,7 +71,7 @@ object LocalFinanceInsightsEngine {
                 add(
                     SpendCoachInsight(
                         title = "Start With Voice or Receipt OCR",
-                        detail = "Use local Whistle voice commands or Mirage receipt scanning to build category trends automatically.",
+                        detail = "Use multilingual voice commands or AI receipt scanning to build category trends automatically.",
                         potentialSavingsLabel = "On-Device",
                         category = "Setup"
                     )

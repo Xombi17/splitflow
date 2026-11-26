@@ -573,5 +573,77 @@ test("Dining & Drinks preferences: LedgerMember dietPreference and drinksAlcohol
   );
 });
 
+test("SettlementRecord: owner can edit mutable fields & delete; blocks immutable mutations and cross-user edits", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const created = pastDate(10000);
+  const settlementRef = aliceDb
+    .collection("users")
+    .doc(ALICE_UID)
+    .collection("settlements")
+    .doc("set_editable");
+
+  await assertSucceeds(
+    settlementRef.set({
+      userId: ALICE_UID,
+      groupId: "grp_goa",
+      fromMemberId: "mem_kabir",
+      toMemberId: "mem_self",
+      amountMinorUnits: 50000,
+      currency: "INR",
+      paymentMethod: "UPI",
+      note: "Initial UPI transfer",
+      dateLabel: "2026-11-21",
+      createdAt: created,
+      updatedAt: created,
+    })
+  );
+
+  // Owner can edit amount, paymentMethod, dateLabel, and note
+  await assertSucceeds(
+    settlementRef.update({
+      amountMinorUnits: 55000,
+      paymentMethod: "CASH",
+      dateLabel: "2026-11-22",
+      note: "Corrected amount paid in cash",
+      updatedAt: pastDate(1000),
+    })
+  );
+
+  // Reject mutating immutable fromMemberId
+  await assertFails(
+    settlementRef.update({
+      fromMemberId: "mem_other",
+      updatedAt: pastDate(500),
+    })
+  );
+
+  // Reject invalid zero/negative amount
+  await assertFails(
+    settlementRef.update({
+      amountMinorUnits: 0,
+      updatedAt: pastDate(500),
+    })
+  );
+
+  // Reject cross-user edit and delete
+  const bobSettlementRef = bobDb
+    .collection("users")
+    .doc(ALICE_UID)
+    .collection("settlements")
+    .doc("set_editable");
+  await assertFails(
+    bobSettlementRef.update({
+      note: "Tampered by Bob",
+      updatedAt: pastDate(500),
+    })
+  );
+  await assertFails(bobSettlementRef.delete());
+
+  // Owner can delete their own settlement
+  await assertSucceeds(settlementRef.delete());
+});
+
+
 
 

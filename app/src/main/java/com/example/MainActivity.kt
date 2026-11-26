@@ -1,6 +1,8 @@
 package com.example
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
@@ -9,6 +11,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.core.content.ContextCompat
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
@@ -58,6 +61,7 @@ import androidx.compose.material.icons.rounded.DynamicFeed
 import androidx.compose.material.icons.rounded.EditNote
 import androidx.compose.material.icons.rounded.GroupAdd
 import androidx.compose.material.icons.rounded.Groups
+import androidx.compose.material.icons.rounded.Hearing
 import androidx.compose.material.icons.rounded.LocalBar
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.People
@@ -111,14 +115,18 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import com.example.ui.motion.SpringButton
 import androidx.credentials.CredentialManager
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory.Companion.APPLICATION_KEY
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.compose.ui.graphics.graphicsLayer
-import com.example.ai.CactusLocalModelManager
 import com.example.ai.LocalSplitAiService
+import com.example.ai.SplitFlowVoiceController
+import com.example.ai.VoicePreferenceStore
 import com.example.data.GuestLedgerRepository
 import com.example.data.GuestSessionStore
 import com.example.data.OnboardingPreferenceStore
@@ -138,6 +146,7 @@ import com.example.model.ExpenseRecord
 import com.example.model.GroupCategory
 import com.example.model.SettlementRecord
 import com.example.ui.components.AiBadge
+import com.example.ui.components.AiProviderSettingsSheet
 import com.example.ui.components.BatchReceiptImporterSheet
 import com.example.ui.components.DiningDrinksSplitSheet
 import com.example.ui.components.DockStaggeredEntrance
@@ -188,9 +197,8 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // STEP 1: Configure Firebase App Check & initialize Cactus local AI runtime
+        // STEP 1: Configure Firebase App Check (Play Integrity / Debug Provider)
         configureAppCheck(this, intent)
-        CactusLocalModelManager.initContext(this)
 
         // STEP 2: Enable Edge-to-Edge rendering
         enableEdgeToEdge()
@@ -258,13 +266,6 @@ private fun SplitFlowRoot() {
         themePreferenceStore.setDarkMode(dark)
     }
 
-    val onboardingAiState by CactusLocalModelManager.state.collectAsStateWithLifecycle()
-    val rootScope = rememberCoroutineScope()
-
-    LaunchedEffect(Unit) {
-        CactusLocalModelManager.refreshCatalogAndHydrate(context)
-    }
-
     LaunchedEffect(currentUser) {
         if (currentUser != null && isGuestMode) {
             guestSessionStore.endGuestSession()
@@ -294,22 +295,6 @@ private fun SplitFlowRoot() {
                         stage == "onboarding" -> {
                             OnboardingScreen(
                                 isReplay = isReplayingOnboarding,
-                                localAiState = onboardingAiState,
-                                onDownloadVoiceModel = { slug ->
-                                    rootScope.launch {
-                                        CactusLocalModelManager.prepareWhistle(context, slug)
-                                    }
-                                },
-                                onDownloadVisionModel = { slug ->
-                                    rootScope.launch {
-                                        CactusLocalModelManager.prepareMirage(context, slug)
-                                    }
-                                },
-                                onDownloadAllModels = {
-                                    rootScope.launch {
-                                        CactusLocalModelManager.prepareAllModels(context)
-                                    }
-                                },
                                 onComplete = {
                                     if (!hasSeenOnboarding) {
                                         hasSeenOnboarding = true
@@ -502,7 +487,15 @@ private fun AuthenticatedSplitFlowShell(
     val spendCoachState by viewModel.spendCoachState.collectAsStateWithLifecycle()
     val coachFollowUpAnswer by viewModel.coachFollowUpAnswer.collectAsStateWithLifecycle()
     val isCoachStreaming by viewModel.isCoachStreaming.collectAsStateWithLifecycle()
-    val localAiEngineState by viewModel.localAiEngineState.collectAsStateWithLifecycle()
+    val aiRouterStatus by viewModel.aiRouterStatus.collectAsStateWithLifecycle()
+    val byokKeys by viewModel.aiKeyStore.keys.collectAsStateWithLifecycle()
+    val aiRoutingStrategy by viewModel.aiKeyStore.routingStrategy.collectAsStateWithLifecycle()
+
+    val voicePreferenceStore = remember(context) { VoicePreferenceStore(context) }
+    val voiceSettings by voicePreferenceStore.settings.collectAsStateWithLifecycle()
+    val voiceController = remember(context) { SplitFlowVoiceController(context) }
+    val voiceControllerState by voiceController.state.collectAsStateWithLifecycle()
+    val lifecycleOwner = LocalLifecycleOwner.current
 
     val toggleDarkMode: () -> Unit = {
         val next = !isDarkMode
@@ -558,6 +551,8 @@ private fun AuthenticatedSplitFlowShell(
         var showExpenseLens by remember { mutableStateOf(false) }
         var showBatchImporter by remember { mutableStateOf(false) }
         var showVoiceSplitter by remember { mutableStateOf(false) }
+        var autoStartVoiceMic by remember { mutableStateOf(false) }
+        var showAiProviderSettings by remember { mutableStateOf(false) }
         var showDiningStudio by remember { mutableStateOf(false) }
         var showSmartSplitEditor by remember { mutableStateOf(false) }
         var showSpendCoach by remember { mutableStateOf(false) }
@@ -578,6 +573,58 @@ private fun AuthenticatedSplitFlowShell(
         }
 
         val readySnapshot = (uiState as? LedgerUiState.Ready)?.snapshot
+
+        // Keep multilingual VoiceController synced with preferences, known contacts, and foreground lifecycle
+        LaunchedEffect(voiceSettings) {
+            voiceController.updateSettings(voiceSettings)
+            val hasMicPermission = ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.RECORD_AUDIO
+            ) == PackageManager.PERMISSION_GRANTED
+            voiceController.setWakeStandbyEnabled(voiceSettings.wakeWordEnabled && hasMicPermission)
+        }
+
+        LaunchedEffect(readySnapshot?.members) {
+            readySnapshot?.members?.let { voiceController.updateKnownMembers(it) }
+        }
+
+        LaunchedEffect(currentTab, selectedGroupId, voiceSettings.locale) {
+            voiceController.setCallbacks(
+                onWake = { inlineCommand ->
+                    val scopeGroupId = if (currentTab == SplitFlowTab.GROUPS) selectedGroupId else null
+                    viewModel.resetVoiceSplit()
+                    if (!inlineCommand.isNullOrBlank()) {
+                        autoStartVoiceMic = false
+                        showVoiceSplitter = true
+                        viewModel.parseNaturalLanguageSplit(
+                            transcript = inlineCommand,
+                            targetGroupId = scopeGroupId,
+                            autoApply = true,
+                            fromDeviceSpeechFallback = true,
+                            locale = voiceSettings.locale
+                        )
+                    } else {
+                        autoStartVoiceMic = true
+                        showVoiceSplitter = true
+                    }
+                }
+            )
+        }
+
+        DisposableEffect(lifecycleOwner, voiceController) {
+            val observer = LifecycleEventObserver { _, event ->
+                when (event) {
+                    Lifecycle.Event.ON_PAUSE -> voiceController.pauseForBackground()
+                    Lifecycle.Event.ON_RESUME -> voiceController.resumeInForeground()
+                    else -> Unit
+                }
+            }
+            lifecycleOwner.lifecycle.addObserver(observer)
+            onDispose {
+                lifecycleOwner.lifecycle.removeObserver(observer)
+                voiceController.release()
+            }
+        }
 
         val openSpendCoach: (String?) -> Unit = { groupId ->
             coachGroupScopeId = groupId
@@ -821,6 +868,44 @@ private fun AuthenticatedSplitFlowShell(
                 )
             }
 
+            // Subtle floating indicator when hands-free "Hey SplitFlow" wake standby is active
+            if (voiceControllerState.isWakeStandbyActive && !showVoiceSplitter && !showProfileSheet && !showAiProviderSettings) {
+                Surface(
+                    shape = RoundedCornerShape(999.dp),
+                    color = tokens.acidLime.copy(alpha = 0.94f),
+                    shadowElevation = 4.dp,
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .statusBarsPadding()
+                        .padding(top = 10.dp)
+                        .clip(RoundedCornerShape(999.dp))
+                        .clickable {
+                            autoStartVoiceMic = true
+                            viewModel.resetVoiceSplit()
+                            showVoiceSplitter = true
+                        }
+                        .testTag("wake_standby_chip")
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Hearing,
+                            contentDescription = "Hey SplitFlow standby active",
+                            tint = tokens.onAcidLime,
+                            modifier = Modifier.size(15.dp)
+                        )
+                        Text(
+                            text = "Hey SplitFlow · ${voiceSettings.locale.shortBadge}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = tokens.onAcidLime
+                        )
+                    }
+                }
+            }
+
             // --- MODAL WORKBENCHES ---
 
             if (showProfileSheet && readySnapshot != null) {
@@ -885,6 +970,40 @@ private fun AuthenticatedSplitFlowShell(
                                     signOutFromSplitFlow(credentialManager, scope)
                                 }
                             },
+                            voiceSettings = voiceSettings,
+                            activeByokKeyCount = byokKeys.count { it.enabled },
+                            routingStrategy = aiRoutingStrategy,
+                            onSelectVoiceLocale = { locale ->
+                                voicePreferenceStore.setLocale(locale)
+                                viewModel.showToast("Voice locale set to ${locale.displayName}")
+                            },
+                            onSelectVoicePersona = { persona ->
+                                voicePreferenceStore.setPersona(persona)
+                                voiceController.updateSettings(voiceSettings.copy(persona = persona))
+                                voiceController.speak(
+                                    text = "Hi, I am ${persona.displayName}, ready to split your expenses.",
+                                    ignoreSoundboxToggle = true
+                                )
+                            },
+                            onToggleWakeWord = { enabled ->
+                                if (enabled && ContextCompat.checkSelfPermission(
+                                        context,
+                                        Manifest.permission.RECORD_AUDIO
+                                    ) != PackageManager.PERMISSION_GRANTED
+                                ) {
+                                    viewModel.showToast("Open Voice Assistant once to grant microphone permission for Hey SplitFlow", isError = true)
+                                    voicePreferenceStore.setWakeWordEnabled(false)
+                                } else {
+                                    voicePreferenceStore.setWakeWordEnabled(enabled)
+                                    viewModel.showToast(
+                                        if (enabled) "Hey SplitFlow wake standby enabled" else "Hey SplitFlow wake standby paused"
+                                    )
+                                }
+                            },
+                            onOpenAiProviderSettings = {
+                                showProfileSheet = false
+                                showAiProviderSettings = true
+                            },
                             onClose = { showProfileSheet = false }
                         )
                     }
@@ -916,7 +1035,8 @@ private fun AuthenticatedSplitFlowShell(
                             transcript = command,
                             targetGroupId = scopeGroupId,
                             autoApply = true,
-                            fromDeviceSpeechFallback = false
+                            fromDeviceSpeechFallback = false,
+                            locale = voiceSettings.locale
                         )
                     },
                     onSelectCreateGroup = {
@@ -1037,10 +1157,11 @@ private fun AuthenticatedSplitFlowShell(
                 ExpenseLensSheet(
                     snapshot = readySnapshot,
                     lensState = receiptLensState,
-                    localAiState = localAiEngineState,
+                    aiRouterStatus = aiRouterStatus,
                     initialGroupId = selectedGroupId,
-                    onAnalyzeBitmap = { viewModel.analyzeReceiptBitmap(it) },
-                    onInstallMirage = { slug -> viewModel.installMirageModel(slug) },
+                    onAnalyzeBitmap = { bitmap, preferCloud ->
+                        viewModel.analyzeReceiptBitmap(bitmap, preferCloud)
+                    },
                     onResetLens = { viewModel.resetReceiptLens() },
                     onSaveExpense = { record ->
                         viewModel.saveExpense(record) {
@@ -1056,31 +1177,48 @@ private fun AuthenticatedSplitFlowShell(
                 VoiceCommandSheet(
                     snapshot = readySnapshot,
                     voiceState = voiceSplitState,
-                    localAiState = localAiEngineState,
+                    aiRouterStatus = aiRouterStatus,
+                    activeByokKeyCount = byokKeys.count { it.enabled },
+                    voiceController = voiceController,
+                    voicePreferenceStore = voicePreferenceStore,
                     initialGroupId = if (currentTab == SplitFlowTab.GROUPS) selectedGroupId else null,
-                    onInstallWhistle = { slug -> viewModel.installWhistleModel(slug) },
-                    onProcessAudio = { wavBytes, grpId, autoApply ->
-                        viewModel.processVoiceAudio(wavBytes, grpId, autoApply)
+                    autoStartListening = autoStartVoiceMic,
+                    onSubmitTranscript = { cmd, grpId, autoApply, fromSpeech, locale ->
+                        autoStartVoiceMic = false
+                        viewModel.parseNaturalLanguageSplit(
+                            transcript = cmd,
+                            targetGroupId = grpId,
+                            autoApply = autoApply,
+                            fromDeviceSpeechFallback = fromSpeech,
+                            locale = locale
+                        )
                     },
-                    onParseCommand = { cmd, grpId, autoApply, fromFallback ->
-                        viewModel.parseNaturalLanguageSplit(cmd, grpId, autoApply, fromFallback)
-                    },
-                    onCommitPending = { res, title, grpId ->
+                    onConfirmPending = { res, title, grpId ->
                         viewModel.commitPendingVoiceResult(res, title, grpId)
                     },
                     onUndoApplied = { res ->
                         viewModel.undoVoiceExecution(res)
                     },
-                    onNavigateToActivity = {
-                        showVoiceSplitter = false
-                        viewModel.resetVoiceSplit()
-                        currentTab = SplitFlowTab.ACTIVITY
-                    },
-                    onResetVoice = { viewModel.resetVoiceSplit() },
+                    onReset = { viewModel.resetVoiceSplit() },
+                    onOpenApiKeySettings = { showAiProviderSettings = true },
                     onDismiss = {
                         showVoiceSplitter = false
+                        autoStartVoiceMic = false
                         viewModel.resetVoiceSplit()
                     }
+                )
+            }
+
+            if (showAiProviderSettings) {
+                AiProviderSettingsSheet(
+                    keyStore = viewModel.aiKeyStore,
+                    onSetRoutingStrategy = { strategy -> viewModel.setAiRoutingStrategy(strategy) },
+                    onAddOrUpdateKey = { entry, onDone -> viewModel.addOrUpdateByokKey(entry, onDone) },
+                    onToggleKey = { id, enabled -> viewModel.toggleByokKey(id, enabled) },
+                    onRemoveKey = { id -> viewModel.removeByokKey(id) },
+                    onResetCooldowns = { viewModel.resetByokCooldowns() },
+                    onTestKey = { entry -> viewModel.testByokKey(entry) },
+                    onDismiss = { showAiProviderSettings = false }
                 )
             }
 
@@ -1098,6 +1236,11 @@ private fun AuthenticatedSplitFlowShell(
                         }
                     },
                     onDismiss = {
+                        showSmartSplitEditor = false
+                        editingExpense = null
+                    },
+                    onDeleteExpense = { record ->
+                        viewModel.deleteExpenseWithUndo(record)
                         showSmartSplitEditor = false
                         editingExpense = null
                     },
@@ -1398,6 +1541,8 @@ private fun SplitFlowTabBody(
                         onViewSettlementProof = onViewSettlementProof,
                         onEditExpense = { exp -> onOpenManualSplit(exp.groupId, null, exp) },
                         onDeleteExpense = { exp -> viewModel.deleteExpenseWithUndo(exp) },
+                        onUpdateSettlement = { settlement -> viewModel.updateSettlement(settlement) },
+                        onDeleteSettlement = { settlement -> viewModel.deleteSettlementWithUndo(settlement) },
                         onToggleSettled = { exp -> viewModel.toggleExpenseSettled(exp) },
                         onLogRecurringCycle = onLogRecurringCycle,
                         modifier = modifier
@@ -1569,7 +1714,7 @@ private fun QuickAddChooserSheet(
 
             QuickAddOptionCard(
                 title = "Batch Multi-Receipt Import",
-                subtitle = "Drop up to 8 trip bills -> parallel on-device Mirage OCR & approval queue",
+                subtitle = "Drop up to 8 trip bills -> parallel ML Kit OCR + Gemini Vision approval queue",
                 icon = Icons.Rounded.DynamicFeed,
                 accentColor = tokens.aiAccent,
                 showAiBadge = true,
@@ -1579,7 +1724,7 @@ private fun QuickAddChooserSheet(
 
             QuickAddOptionCard(
                 title = "Voice & Natural Language Split",
-                subtitle = "Local Cactus Whistle transcription & instant ledger updates",
+                subtitle = "EN/HI/MR/TA voice, Hey SplitFlow wake word & instant ledger updates",
                 icon = Icons.Rounded.Mic,
                 accentColor = tokens.aiAccent,
                 showAiBadge = true,

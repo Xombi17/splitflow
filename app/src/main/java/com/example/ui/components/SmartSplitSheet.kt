@@ -23,12 +23,15 @@ import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.WarningAmber
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
@@ -36,6 +39,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -91,6 +95,7 @@ fun SmartSplitSheet(
     todayIso: String,
     onSaveExpense: (ExpenseRecord) -> Unit,
     onDismiss: () -> Unit,
+    onDeleteExpense: ((ExpenseRecord) -> Unit)? = null,
     onOpenDiningStudio: (() -> Unit)? = null
 ) {
     val tokens = SplitFlowThemeTokens.colors
@@ -224,9 +229,30 @@ fun SmartSplitSheet(
     }
     var newItemName by remember { mutableStateOf("") }
     var newItemPrice by remember { mutableStateOf("") }
+    var itemizedTaxText by remember(editingExpense) {
+        mutableStateOf(
+            editingExpense?.taxMinorUnits?.takeIf { it > 0L }?.let { FinanceEngine.minorToMajorInput(it) } ?: ""
+        )
+    }
+    var itemizedServiceText by remember(editingExpense) {
+        mutableStateOf(
+            editingExpense?.serviceChargeMinorUnits?.takeIf { it > 0L }?.let { FinanceEngine.minorToMajorInput(it) } ?: ""
+        )
+    }
+    var itemizedDiscountText by remember(editingExpense) {
+        mutableStateOf(
+            editingExpense?.discountMinorUnits?.takeIf { it > 0L }?.let { FinanceEngine.minorToMajorInput(it) } ?: ""
+        )
+    }
+    var confirmDeleteExpense by remember { mutableStateOf(false) }
+
+    val itemizedTaxMinor = if (splitType == SplitType.ITEMIZED) FinanceEngine.parseMajorToMinor(itemizedTaxText) else (editingExpense?.taxMinorUnits ?: 0L)
+    val itemizedServiceMinor = if (splitType == SplitType.ITEMIZED) FinanceEngine.parseMajorToMinor(itemizedServiceText) else (editingExpense?.serviceChargeMinorUnits ?: 0L)
+    val itemizedDiscountMinor = if (splitType == SplitType.ITEMIZED) FinanceEngine.parseMajorToMinor(itemizedDiscountText) else (editingExpense?.discountMinorUnits ?: 0L)
 
     val totalMinor = if (splitType == SplitType.ITEMIZED && manualLineItems.isNotEmpty()) {
-        manualLineItems.sumOf { it.totalPriceMinor }
+        (manualLineItems.sumOf { it.totalPriceMinor } + itemizedTaxMinor + itemizedServiceMinor - itemizedDiscountMinor)
+            .coerceAtLeast(0L)
     } else {
         FinanceEngine.parseMajorToMinor(amountText)
     }
@@ -268,9 +294,9 @@ fun SmartSplitSheet(
         SplitType.ITEMIZED -> {
             FinanceEngine.computeItemizedBreakdown(
                 lineItems = manualLineItems,
-                taxMinor = 0L,
-                serviceChargeMinor = 0L,
-                discountMinor = 0L,
+                taxMinor = itemizedTaxMinor,
+                serviceChargeMinor = itemizedServiceMinor,
+                discountMinor = itemizedDiscountMinor,
                 expectedGrandTotalMinor = totalMinor
             ).allocations
         }
@@ -604,6 +630,67 @@ fun SmartSplitSheet(
                 }
             }
 
+            // Quick Direct IOU / Full-Amount Presets (solves accidental 2-way split for 1-on-1 IOUs)
+            val otherScopeMembers = remember(scopeMembers, selfId) {
+                scopeMembers.filter { it.id != selfId }
+            }
+            if (otherScopeMembers.isNotEmpty()) {
+                val primaryFriend = otherScopeMembers.first()
+                val friendFirst = primaryFriend.name.split(" ").first()
+                val isFriendOwesFull = splitType == SplitType.EXACT &&
+                    !multiPayerMode &&
+                    singlePayerId == selfId &&
+                    resolvedAllocations.size == 1 &&
+                    resolvedAllocations.first().memberId == primaryFriend.id
+                val isYouOweFull = splitType == SplitType.EXACT &&
+                    !multiPayerMode &&
+                    singlePayerId == primaryFriend.id &&
+                    resolvedAllocations.size == 1 &&
+                    resolvedAllocations.first().memberId == selfId
+
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("Quick Split Presets", style = MaterialTheme.typography.titleSmall)
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        FilterChip(
+                            selected = splitType == SplitType.EQUAL && equalSelectedIds.size == scopeMembers.size,
+                            onClick = {
+                                splitType = SplitType.EQUAL
+                                equalSelectedIds.clear()
+                                equalSelectedIds.addAll(scopeMembers.map { it.id })
+                            },
+                            label = { Text("Split Equally") },
+                            modifier = Modifier.testTag("preset_split_equally")
+                        )
+                        FilterChip(
+                            selected = isFriendOwesFull,
+                            onClick = {
+                                multiPayerMode = false
+                                singlePayerId = selfId
+                                splitType = SplitType.EXACT
+                                exactInputs.clear()
+                                val fullStr = if (totalMinor > 0L) FinanceEngine.minorToMajorInput(totalMinor) else amountText
+                                exactInputs[primaryFriend.id] = fullStr
+                            },
+                            label = { Text("$friendFirst Owes Full (100%)") },
+                            modifier = Modifier.testTag("preset_friend_owes_full")
+                        )
+                        FilterChip(
+                            selected = isYouOweFull,
+                            onClick = {
+                                multiPayerMode = false
+                                singlePayerId = primaryFriend.id
+                                splitType = SplitType.EXACT
+                                exactInputs.clear()
+                                val fullStr = if (totalMinor > 0L) FinanceEngine.minorToMajorInput(totalMinor) else amountText
+                                exactInputs[selfId] = fullStr
+                            },
+                            label = { Text("You Owe $friendFirst Full") },
+                            modifier = Modifier.testTag("preset_you_owe_full")
+                        )
+                    }
+                }
+            }
+
             // 5 Split Modes Selector
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("Split Mode", style = MaterialTheme.typography.titleSmall)
@@ -680,13 +767,100 @@ fun SmartSplitSheet(
                         }
 
                         SplitType.PERCENTAGE -> {
+                            val pctProgress = (totalPercentBps / 10_000f).coerceIn(0f, 1f)
+                            val remainingPct = (10_000L - totalPercentBps) / 100.0
+                            val allocById = resolvedAllocations.associateBy { it.memberId }
+
+                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "Allocated: ${"%.1f".format(totalPercentBps / 100.0)}% / 100%",
+                                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                                        color = if (totalPercentBps == 10_000L) tokens.positive else tokens.warning
+                                    )
+                                    if (remainingPct > 0.05 && scopeMembers.isNotEmpty()) {
+                                        Text(
+                                            text = "Auto-fill ${"%.1f".format(remainingPct)}%",
+                                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                            color = tokens.aiAccent,
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(6.dp))
+                                                .clickable {
+                                                    val target = scopeMembers.lastOrNull {
+                                                        (percentInputs[it.id]?.toDoubleOrNull() ?: 0.0) == 0.0
+                                                    } ?: scopeMembers.last()
+                                                    val current = percentInputs[target.id]?.toDoubleOrNull() ?: 0.0
+                                                    percentInputs[target.id] = "%.1f".format(current + remainingPct)
+                                                }
+                                                .padding(horizontal = 6.dp, vertical = 3.dp)
+                                                .testTag("autofill_remaining_percent_button")
+                                        )
+                                    }
+                                }
+                                LinearProgressIndicator(
+                                    progress = { pctProgress },
+                                    color = if (totalPercentBps == 10_000L) tokens.positive else tokens.aiAccent,
+                                    trackColor = tokens.elevatedSurface,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(6.dp)
+                                        .clip(RoundedCornerShape(999.dp))
+                                )
+
+                                // Quick Ratio Presets
+                                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    if (scopeMembers.size == 2) {
+                                        listOf(50 to 50, 60 to 40, 70 to 30, 80 to 20).forEach { (a, b) ->
+                                            FilterChip(
+                                                selected = false,
+                                                onClick = {
+                                                    percentInputs[scopeMembers[0].id] = a.toString()
+                                                    percentInputs[scopeMembers[1].id] = b.toString()
+                                                },
+                                                label = { Text("$a/$b") },
+                                                modifier = Modifier.testTag("pct_preset_${a}_${b}")
+                                            )
+                                        }
+                                    } else if (scopeMembers.isNotEmpty()) {
+                                        FilterChip(
+                                            selected = false,
+                                            onClick = {
+                                                val base = 100.0 / scopeMembers.size
+                                                var running = 0.0
+                                                scopeMembers.forEachIndexed { idx, m ->
+                                                    val v = if (idx == scopeMembers.lastIndex) (100.0 - running) else kotlin.math.floor(base * 10.0) / 10.0
+                                                    running += v
+                                                    percentInputs[m.id] = "%.1f".format(v)
+                                                }
+                                            },
+                                            label = { Text("Even %") },
+                                            modifier = Modifier.testTag("pct_preset_even")
+                                        )
+                                    }
+                                }
+                            }
+
                             scopeMembers.forEach { m ->
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.SpaceBetween
                                 ) {
-                                    Text(m.name, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(m.name, style = MaterialTheme.typography.bodyMedium)
+                                        if (totalMinor > 0L) {
+                                            TabularCurrencyText(
+                                                minorUnits = allocById[m.id]?.amountMinorUnits ?: 0L,
+                                                currency = currency,
+                                                style = TabularSmallStyle,
+                                                color = tokens.positive
+                                            )
+                                        }
+                                    }
                                     OutlinedTextField(
                                         value = percentInputs[m.id].orEmpty(),
                                         onValueChange = { percentInputs[m.id] = it },
@@ -804,6 +978,16 @@ fun SmartSplitSheet(
                                         }
                                     }
                                     FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        val allSelected = scopeMembers.all { it.id in item.assignedMemberIds }
+                                        FilterChip(
+                                            selected = allSelected,
+                                            onClick = {
+                                                manualLineItems[idx] = item.copy(
+                                                    assignedMemberIds = if (allSelected) emptyList() else scopeMembers.map { it.id }
+                                                )
+                                            },
+                                            label = { Text("Everyone") }
+                                        )
                                         scopeMembers.forEach { m ->
                                             val sel = m.id in item.assignedMemberIds
                                             FilterChip(
@@ -817,6 +1001,42 @@ fun SmartSplitSheet(
                                             )
                                         }
                                     }
+                                }
+                            }
+                            if (manualLineItems.isNotEmpty()) {
+                                Text(
+                                    text = "Shared Extras (Prorated by item share)",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = tokens.inkMuted
+                                )
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    OutlinedTextField(
+                                        value = itemizedTaxText,
+                                        onValueChange = { itemizedTaxText = it },
+                                        label = { Text("Tax (${currency.symbol})") },
+                                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                                        singleLine = true,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    OutlinedTextField(
+                                        value = itemizedServiceText,
+                                        onValueChange = { itemizedServiceText = it },
+                                        label = { Text("Tip/Fee") },
+                                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                                        singleLine = true,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    OutlinedTextField(
+                                        value = itemizedDiscountText,
+                                        onValueChange = { itemizedDiscountText = it },
+                                        label = { Text("Discount") },
+                                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                                        singleLine = true,
+                                        modifier = Modifier.weight(1f)
+                                    )
                                 }
                             }
                         }
@@ -1009,9 +1229,9 @@ fun SmartSplitSheet(
                         payers = resolvedPayers,
                         allocations = resolvedAllocations,
                         lineItems = if (splitType == SplitType.ITEMIZED) manualLineItems.toList() else emptyList(),
-                        taxMinorUnits = editingExpense?.taxMinorUnits ?: 0L,
-                        serviceChargeMinorUnits = editingExpense?.serviceChargeMinorUnits ?: 0L,
-                        discountMinorUnits = editingExpense?.discountMinorUnits ?: 0L,
+                        taxMinorUnits = itemizedTaxMinor,
+                        serviceChargeMinorUnits = itemizedServiceMinor,
+                        discountMinorUnits = itemizedDiscountMinor,
                         recurringFrequency = recurringFrequency.name,
                         nextDueDateLabel = nextDue,
                         receiptPhotoPath = receiptPhotoPath,
@@ -1027,6 +1247,46 @@ fun SmartSplitSheet(
             ) {
                 Text(if (editingExpense != null) "Update Split" else "Save Split")
             }
+
+            if (editingExpense != null && onDeleteExpense != null) {
+                OutlinedButton(
+                    onClick = { confirmDeleteExpense = true },
+                    border = BorderStroke(1.dp, tokens.negative.copy(alpha = 0.5f)),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = tokens.negative),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                        .testTag("delete_expense_in_sheet_button")
+                ) {
+                    Icon(Icons.Rounded.DeleteOutline, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Delete Expense")
+                }
+            }
         }
+    }
+
+    if (confirmDeleteExpense && editingExpense != null && onDeleteExpense != null) {
+        AlertDialog(
+            onDismissRequest = { confirmDeleteExpense = false },
+            title = { Text("Delete Expense?") },
+            text = { Text("Delete \"${editingExpense.title}\"? You can restore it immediately via Undo.") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        confirmDeleteExpense = false
+                        onDeleteExpense(editingExpense)
+                        onDismiss()
+                    }
+                ) {
+                    Text("Delete", color = tokens.negative, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmDeleteExpense = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
     }
 }

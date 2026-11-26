@@ -65,7 +65,7 @@ fun attemptAutoSignIn(
         onUnauthenticated()
         return
     }
-    if (clientId.isBlank() || clientId == "splitflow-google-sign-in-not-configured") {
+    if (clientId.isBlank()) {
         onUnauthenticated()
         return
     }
@@ -122,7 +122,7 @@ fun onGoogleSignInClicked(
         onAuthError("Google Sign-In configuration missing: default_web_client_id not found")
         return
     }
-    if (clientId.isBlank() || clientId == "splitflow-google-sign-in-not-configured") {
+    if (clientId.isBlank()) {
         onAuthError("Google Sign-In is not configured in this build. SplitFlow is fully active offline in Guest Mode!")
         return
     }

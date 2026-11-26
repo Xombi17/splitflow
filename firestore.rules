@@ -295,10 +295,15 @@ service cloud.firestore {
                          isValidId(settlementId) &&
                          isValidSettlementRecord(incoming(), userId) &&
                          incoming().userId == existing().userId &&
+                         incoming().fromMemberId == existing().fromMemberId &&
+                         incoming().toMemberId == existing().toMemberId &&
                          incoming().createdAt == existing().createdAt &&
                          (
-                           // Action: Edit settlement note, payment method, or proof attachment
-                           incoming().diff(existing()).affectedKeys().hasOnly(['note', 'paymentMethod', 'paymentProofPath', 'updatedAt'])
+                           // Action: Edit settlement amount, currency, method, date, note, or proof
+                           incoming().diff(existing()).affectedKeys().hasOnly([
+                             'amountMinorUnits', 'currency', 'paymentMethod', 'dateLabel',
+                             'note', 'paymentProofPath', 'updatedAt'
+                           ])
                          );
 
         allow delete: if isOwner(userId) && isValidId(settlementId);

@@ -19,7 +19,11 @@ debug.keystore
 *.keystore
 *.keystore.base64
 *.jks
+*.jks.b64
+*-keystore.b64
+*.p12
 *-debug.log
 
 # brag-output/
 product-launch-video
+public/assets/aistudio/
